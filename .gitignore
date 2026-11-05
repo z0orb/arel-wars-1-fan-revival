@@ -1,0 +1,3 @@
+# Everything in this project stays local. Only this file is tracked.
+*
+!.gitignore
