@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Zips the internal documents to snapshots/phase-N.zip and records the hash in HANDOFF.md.
+# Usage: scripts/snapshot N
+source "$(dirname "$0")/env.sh"
+n=${1:?usage: scripts/snapshot N}
+out=snapshots/phase-$n.zip
+[ -e "$out" ] && { echo "$out already exists; snapshots are never overwritten" >&2; exit 1; }
+mkdir -p snapshots
+jar cfM "$out" PLAN.md HANDOFF.md CLAUDE.md patches scripts docs
+h=$(sha "$out")
+sed -i "s#^- Latest snapshot and SHA-256:.*#- Latest snapshot and SHA-256: \`$out\`, \`$h\`#" HANDOFF.md
+echo "$out $h"

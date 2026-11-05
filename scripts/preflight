@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Session start check. Usage: scripts/preflight [--no-phone]
+# --no-phone is for sessions that never touch the phone (Phases 0 and 1). It reports the skip.
+source "$(dirname "$0")/env.sh"
+bad=0
+ok() { echo "ok    $1"; }
+no() { echo "FAIL  $1"; bad=1; }
+param() { node scripts/gates/helpers.mjs param "$1"; }
+
+[ "$(sha "$ORIGINAL")" = "$ORIGINAL_SHA" ] && ok "original APK hash" || no "original APK hash"
+for t in "$APKTOOL" tools/jadx/jadx-1.5.6/bin/jadx.bat tools/ghidra/ghidra_12.2_PUBLIC/ghidraRun.bat "$JDK25/bin/java.exe" keys/arelwars.jks keys/arelwars.pass patches/identity.json; do
+  [ -e "$t" ] && ok "$t" || no "$t missing"
+done
+for c in java keytool adb node aapt2 zipalign dexdump apksigner.bat patch; do
+  command -v "$c" >/dev/null && ok "tool $c" || no "tool $c missing"
+done
+if (cd scripts/gates && sha256sum -c --quiet SHA256SUMS); then ok "gate script hashes"; else no "gate script hashes"; fi
+# Only the public set may ever be tracked (HANDOFF.md, "Public repo plan"). Anything else is a leak.
+extra=$(git ls-files | LC_ALL=C sort | LC_ALL=C comm -23 - scripts/public-files.txt)
+if [ -z "$extra" ]; then ok "only files in scripts/public-files.txt are tracked"; else no "tracked files outside the public list: $extra"; fi
+
+if [ "${1:-}" = --no-phone ]; then
+  echo "SKIP  phone checks (--no-phone)"
+else
+  if [ "$(adb -s "$SERIAL" get-state 2>/dev/null)" = device ]; then
+    ok "phone $SERIAL connected"
+    for k in persist.security.adbinstall persist.security.adbinput; do
+      want=$(param "phone_baseline.$k"); got=$(adbs shell getprop "$k" | tr -d '\r')
+      [ "$got" = "$want" ] && ok "$k=$got" || no "$k is '$got', expected '$want'"
+    done
+    recorded=$(sed -n 's/^- Installed package: *//p' HANDOFF.md | cut -d. -f1)
+    if adbs shell pm list packages "$PKG" | tr -d '\r' | grep -qx "package:$PKG"; then installed=yes; else installed=no; fi
+    case "$recorded" in
+      none*) [ $installed = no ] && ok "package absent, as recorded" || no "package installed but HANDOFF.md says none" ;;
+      *) [ $installed = yes ] && ok "package installed, as recorded" || no "package missing but HANDOFF.md records one" ;;
+    esac
+  else
+    no "phone $SERIAL not connected"
+  fi
+fi
+[ $bad = 0 ] && echo "PREFLIGHT PASS" || { echo "PREFLIGHT FAIL"; exit 1; }

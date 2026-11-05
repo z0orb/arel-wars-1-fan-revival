@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Device baseline. Evidence lives in logs/baseline/ (install.txt, logcat.txt).
+source "$(dirname "$0")/../env.sh"; source scripts/gates/lib.sh
+gate_start 2
+I=logs/baseline/install.txt; L=logs/baseline/logcat.txt
+[ -s "$I" ] && pass "install result saved: $(tr -d '\r' <"$I" | tail -1)" || fail "install result saved"
+grep -q 'libgameDSO' "$L" 2>/dev/null && pass "logcat shows libgameDSO.so activity" || fail "logcat shows libgameDSO.so activity"
+if [ ! -s "$L" ]; then fail "libgameDSO.so loaded (no logcat saved)"
+elif grep -E 'libgameDSO.*(dlopen failed|not found|cannot)|dlopen failed.*libgameDSO' "$L" >"$EV/load-failures.txt"; then fail "libgameDSO.so loaded (see load-failures.txt)"
+else pass "libgameDSO.so loaded"; fi
+grep -Eqi 'text relocation|DT_TEXTREL' "$L" 2>/dev/null && pass "text-relocation warning captured" || fail "text-relocation warning captured"
+[ -s docs/BASELINE.md ] && pass "docs/BASELINE.md exists" || fail "docs/BASELINE.md exists"
+adbs shell pm list packages "$PKG" | tr -d '\r' | grep -qx "package:$PKG" && fail "package uninstalled" || pass "package uninstalled"
+[ "$(adbs shell settings get global airplane_mode_on | tr -d '\r')" = 0 ] && pass "airplane mode off" || fail "airplane mode off"
+gate_end

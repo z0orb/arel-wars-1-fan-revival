@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# Rebuilds the APK from the original and patches/. Usage: scripts/build [release|debug|all]
+# Section 6.2 of PLAN.md, with the binary manifest fallback recorded in HANDOFF.md.
+source "$(dirname "$0")/env.sh"
+shopt -s nullglob
+
+build_variant() {
+  local variant=$1; local W="work/build-$variant"
+  echo "== build $variant"
+
+  [ "$(sha "$ORIGINAL")" = "$ORIGINAL_SHA" ] || { echo "original APK hash mismatch" >&2; exit 1; }
+
+  rm -rf "$W"
+  mkdir -p "$W/out" "dist"
+  java -jar "$APKTOOL" d --no-res -f -o "$W/decoded" "$ORIGINAL" >"$W/decode.log" 2>&1
+
+  # apktool writes CRLF on Windows. Normalize so patches apply the same way everywhere.
+  find "$W/decoded/smali" -name '*.smali' -exec sed -i 's/\r$//' {} +
+
+  for p in patches/smali/*.patch; do
+    echo "smali patch: $p"
+    patch -d "$W/decoded" -p1 --fuzz=0 --forward --batch --no-backup-if-mismatch \
+      -i "$PWD/$p" >>"$W/patch.log" || { cat "$W/patch.log" >&2; exit 1; }
+  done
+
+  java -jar "$APKTOOL" b -j 1 "$W/decoded" -o "$W/assembled.apk" >"$W/assemble.log" 2>&1
+  unzip -q -o "$W/assembled.apk" classes.dex -d "$W/out"
+
+  local ops=(patches/manifest/*.json)
+  [ "$variant" = debug ] && ops+=(scripts/lib/debuggable.json)
+  node scripts/lib/axml.mjs "$W/decoded/AndroidManifest.xml" "$W/out/AndroidManifest.xml" ${ops[@]+"${ops[@]}"}
+
+  local replacements=("classes.dex=$W/out/classes.dex" "AndroidManifest.xml=$W/out/AndroidManifest.xml")
+  local specs=(patches/binary/*.json)
+  if [ ${#specs[@]} -gt 0 ]; then
+    local entry
+    while IFS= read -r entry; do
+      entry=${entry%$'\r'}
+      replacements+=("$entry=$W/out/$entry")
+    done < <(node scripts/lib/bytepatch.mjs "$W/out" "$W/decoded" "${specs[@]}")
+  fi
+
+  local texts=(patches/text/*.json)
+  if [ ${#texts[@]} -gt 0 ]; then
+    local entry
+    while IFS= read -r entry; do
+      entry=${entry%$'\r'}
+      replacements+=("$entry=$W/out/$entry")
+    done < <(node scripts/lib/zt1text.mjs "$W/out" "$W/decoded" "${texts[@]}")
+  fi
+
+  java scripts/Transplant.java "$ORIGINAL" "$W/transplanted.apk" "${replacements[@]}"
+  zipalign -p -f 4 "$W/transplanted.apk" "$W/aligned.apk"
+
+  local out; out=$(apk_path "$variant")
+  apksigner.bat sign --ks keys/arelwars.jks --ks-pass file:keys/arelwars.pass --ks-key-alias arelwars \
+    --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true \
+    --out "$out" "$W/aligned.apk"
+  rm -f "$out.idsig"
+  apksigner.bat verify --min-sdk-version 7 "$out"
+  sha "$out" >"$out.sha256"
+  echo "$out $(cat "$out.sha256")"
+}
+
+case "${1:-all}" in
+  release|debug) build_variant "$1" ;;
+  all) build_variant release; build_variant debug ;;
+  *) echo "usage: scripts/build [release|debug|all]" >&2; exit 2 ;;
+esac

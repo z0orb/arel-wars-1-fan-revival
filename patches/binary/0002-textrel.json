@@ -1,0 +1,71 @@
+{
+  "entry": "lib/armeabi/libgameDSO.so",
+  "reason": "Remove DT_TEXTREL for target 23 and above. The 12 read-only relocations become R_ARM_NONE and the tag is removed from .dynamic. Only the unreachable libgcc unwinder uses those literals (audit Q7).",
+  "edits": [
+    {
+      "offset": "0x402d4",
+      "before": "17000000",
+      "after": "00000000"
+    },
+    {
+      "offset": "0x402dc",
+      "before": "17000000",
+      "after": "00000000"
+    },
+    {
+      "offset": "0x402e4",
+      "before": "17000000",
+      "after": "00000000"
+    },
+    {
+      "offset": "0x402ec",
+      "before": "17000000",
+      "after": "00000000"
+    },
+    {
+      "offset": "0x402f4",
+      "before": "17000000",
+      "after": "00000000"
+    },
+    {
+      "offset": "0x402fc",
+      "before": "17000000",
+      "after": "00000000"
+    },
+    {
+      "offset": "0x40304",
+      "before": "17000000",
+      "after": "00000000"
+    },
+    {
+      "offset": "0x4030c",
+      "before": "17000000",
+      "after": "00000000"
+    },
+    {
+      "offset": "0x40314",
+      "before": "17000000",
+      "after": "00000000"
+    },
+    {
+      "offset": "0x4031c",
+      "before": "17000000",
+      "after": "00000000"
+    },
+    {
+      "offset": "0x458c4",
+      "before": "02850500",
+      "after": "00000000"
+    },
+    {
+      "offset": "0x458cc",
+      "before": "02ea0400",
+      "after": "00000000"
+    },
+    {
+      "offset": "0x11fd30",
+      "before": "1600000000000000faffff6fbe0a00000000000000000000",
+      "after": "faffff6fbe0a000000000000000000000000000000000000"
+    }
+  ]
+}

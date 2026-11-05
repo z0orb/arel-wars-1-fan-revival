@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Normal sideload at the final target, then gate-3 still passes.
+source "$(dirname "$0")/../env.sh"; source scripts/gates/lib.sh
+gate_start 4
+T=$EV/tmp; mkdir -p "$T"
+unzip -q -o "$(apk_path release)" lib/armeabi/libgameDSO.so -d "$T"
+H elf-textrel "$T/lib/armeabi/libgameDSO.so" && pass "ELF has no DT_TEXTREL" || fail "ELF has no DT_TEXTREL"
+aapt2 dump badging "$(apk_path release)" 2>&1 | tr -d '' >"$EV/badging.txt"
+grep -q "targetSdkVersion:'28'" "$EV/badging.txt" && pass "target is 28" || fail "target is 28"
+aapt2 dump xmltree --file AndroidManifest.xml "$(apk_path release)" 2>&1 | tr -d '' >"$EV/manifest.txt"
+[ "$(grep -c 'configChanges(0x0101001f)=0x00000da0' "$EV/manifest.txt")" = 2 ] && pass "both activities handle screen size changes" || fail "both activities handle screen size changes"
+[ "$(param install_bypass)" = false ] && pass "params.json no longer uses the bypass flag" || fail "params.json no longer uses the bypass flag"
+bash scripts/install release >"$EV/install.txt" 2>&1 && pass "adb install works without the bypass flag" || fail "adb install works without the bypass flag"
+launch
+common_checks release
+adbs shell am force-stop "$PKG"
+rm -rf "$T"
+# --skip-gate-3 is for reruns when the phone can't join Wi-Fi, which gate-3 needs.
+# It always prints as a SKIP. gate-7 must run gate-3 in full.
+if [ "${1:-}" = --skip-gate-3 ]; then
+  echo "SKIP  gate-3 not rerun (--skip-gate-3); last full pass logs/gate-3-20261105-163448"
+else
+  bash scripts/gates/gate-3 && pass "gate-3 still passes" || fail "gate-3 still passes"
+fi
+gate_end

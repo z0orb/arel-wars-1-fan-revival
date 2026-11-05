@@ -1,0 +1,9 @@
+{
+  "entry": "lib/armeabi/libgameDSO.so",
+  "reason": "Three loaders test a heap pointer with a signed compare (cmp rN,#0; ble). 32-bit heaps on current Android sit above 0x80000000, so the pointer reads as negative and the load is silently skipped. CMapLayerData::PreLoad then leaves the layer data null and CPdMap::MakeWayPointData segfaults on entering battle. Change ble to beq, keeping the null check.",
+  "edits": [
+    { "offset": "0x7f9a6", "before": "1ddd", "after": "1dd0" },
+    { "offset": "0x522d0", "before": "0edd", "after": "0ed0" },
+    { "offset": "0x52308", "before": "08dd", "after": "08d0" }
+  ]
+}

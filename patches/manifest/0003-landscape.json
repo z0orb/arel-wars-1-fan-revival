@@ -1,0 +1,3 @@
+[
+  { "op": "set-attr", "tag": "activity", "attr": "screenOrientation", "id": "0x0101001e", "type": "int", "value": 0 }
+]

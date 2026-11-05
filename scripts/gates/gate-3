@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Severed from the network, responsive at the title screen, in both variants.
+# Usage: gate-3 [variant ...]
+source "$(dirname "$0")/../env.sh"; source scripts/gates/lib.sh
+gate_start 3
+variants=("$@"); [ ${#variants[@]} -gt 0 ] || variants=(debug release)
+for v in "${variants[@]}"; do
+  install_variant "$v" && pass "$v: installed" || fail "$v: installed"
+  [ "$(adbs shell settings get global airplane_mode_on | tr -d '\r')" = 0 ] && pass "$v: airplane mode off" || fail "$v: airplane mode off"
+  [ "$(adbs shell settings get global wifi_on | tr -d '\r')" != 0 ] && pass "$v: Wi-Fi on" || fail "$v: Wi-Fi on"
+
+  uid=$(app_uid)
+  netstats_dump "$EV/netstats-before-$v.txt"
+  launch
+  common_checks "$v"
+
+  aapt2 dump permissions "$(apk_path "$v")" 2>&1 | tr -d '\r' | sed -n "s/^uses-permission: name='\([^']*\)'.*/\1/p" | sort >"$EV/permissions-$v.txt"
+  param permission_allowlist | node -e "JSON.parse(require('fs').readFileSync(0,'utf8')).forEach(p=>console.log(p))" | tr -d '\r' | sort >"$EV/allowlist.txt"
+  [ -s "$EV/allowlist.txt" ] && cmp -s "$EV/permissions-$v.txt" "$EV/allowlist.txt" && pass "$v: permissions match the allowlist" || fail "$v: permissions match the allowlist"
+  # Checks the whole tree: the original also has a permission-group named after INTERNET.
+  aapt2 dump xmltree --file AndroidManifest.xml "$(apk_path "$v")" 2>&1 | tr -d '\r' >"$EV/manifest-$v.txt"
+  grep -q ' E: manifest' "$EV/manifest-$v.txt" && ! grep -q 'android.permission.INTERNET' "$EV/manifest-$v.txt" && pass "$v: INTERNET absent from the manifest" || fail "$v: INTERNET absent from the manifest"
+
+  # With no input the title may only blink its prompt. Otherwise an intro advancing by itself would pass the tap check.
+  control=$(shot "title-control-$v")
+  sleep 3
+  before=$(shot "title-before-$v")
+  idle=$(H pixels-changed "$control" "$before")
+  H at-most "$idle" "$(param title_idle_max_change)" && pass "$v: title holds with no input (changed $idle)" || fail "$v: title holds with no input (changed $idle)"
+  run_steps macros.title_tap && pass "$v: title tap sent" || fail "$v: title tap sent"
+  sleep 3
+  after=$(shot "title-after-$v")
+  tapped=$(H pixels-changed "$before" "$after")
+  H at-least "$tapped" "$(param title_tap_min_change)" && pass "$v: a tap changes the title screen (changed $tapped)" || fail "$v: a tap changes the title screen (changed $tapped)"
+
+  sleep "$(param netstats_wait_sec)"
+  netstats_dump "$EV/netstats-after-$v.txt"
+  a=$(H netstats "$EV/netstats-before-$v.txt" "$uid"); b=$(H netstats "$EV/netstats-after-$v.txt" "$uid")
+  [ -n "$uid" ] && [ "$a" = "$b" ] && pass "$v: zero app traffic over the wait (uid $uid, $a to $b bytes)" || fail "$v: zero app traffic (uid $uid, $a to $b bytes)"
+  adbs shell am force-stop "$PKG"
+done
+grep -Eq '^- Frozen identity:.*frozen for good' HANDOFF.md && pass "identity declared frozen in HANDOFF.md" || fail "identity declared frozen in HANDOFF.md"
+gate_end

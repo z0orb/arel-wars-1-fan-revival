@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Static audit results exist and are complete. No phone needed.
+# Format: docs/AUDIT.md has "## Q1" to "## Q10", each with an answer and a "Status: confirmed|unverified" line.
+source "$(dirname "$0")/../env.sh"; source scripts/gates/lib.sh
+gate_start 1
+A=docs/AUDIT.md
+[ -s "$A" ] && pass "$A exists" || fail "$A exists"
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  section=$(awk -v h="## Q$i" 'index($0,h)==1 && (length($0)==length(h) || substr($0,length(h)+1,1) !~ /[0-9]/){on=1;next} /^## /{on=0} on' "$A" 2>/dev/null)
+  [ "$(echo "$section" | grep -v '^Status:' | grep -c '[^[:space:]]')" -gt 0 ] && pass "Q$i answered" || fail "Q$i answered"
+  echo "$section" | grep -Eqi '^Status: *(confirmed|unverified)' && pass "Q$i has a status" || fail "Q$i has a status"
+done
+[ -s docs/STUBS.md ] && pass "docs/STUBS.md exists" || fail "docs/STUBS.md exists"
+last=$(grep '[^[:space:]]' "$A" 2>/dev/null | tail -1)
+echo "$last" | grep -Eqi '^(\*\*)?(go|no-go)\b' && pass "ends with go or no-go: $last" || fail "ends with a written go or no-go"
+gate_end

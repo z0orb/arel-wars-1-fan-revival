@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# Stability at the final target. Usage: gate-5 [variant ...]
+# Needs an existing save in slot 1, on Stage 1, with a unit equipped and the tutorial prompt answered
+# (see the tap map in HANDOFF.md). Treat that save as throwaway: this gate quits a battle.
+source "$(dirname "$0")/../env.sh"; source scripts/gates/lib.sh
+gate_start 5
+variants=("$@"); [ ${#variants[@]} -gt 0 ] || variants=(debug release)
+for v in "${variants[@]}"; do
+  install_variant "$v" && pass "$v: installed" || fail "$v: installed"
+  launch
+  run_steps macros.to_worldmap && pass "$v: reached the world map" || fail "$v: reached the world map"
+
+  # Corners run on the world map, which is nearly still (0.3% idle). In battle every frame changes,
+  # so a tap that missed would still pass. Each control must change the screen a lot, then close again.
+  if n=$(H count macros.corner_checks); then
+    [ "$n" -ge 4 ] && pass "$v: four corners defined" || fail "$v: four corners defined"
+    for ((i = 0; i < n; i++)); do
+      b=$(shot "corner$i-before-$v")
+      run_steps "macros.corner_checks.$i"; sleep 3
+      a=$(shot "corner$i-after-$v")
+      c=$(H pixels-changed "$b" "$a")
+      H at-least "$c" "$(param corner_min_change)" && pass "$v: corner $i tap opens its control (changed $c)" || fail "$v: corner $i tap opens its control (changed $c)"
+      run_steps "macros.corner_returns.$i"; sleep 3
+      r=$(shot "corner$i-return-$v")
+      c=$(H pixels-changed "$b" "$r")
+      H at-most "$c" "$(param corner_return_max_change)" && pass "$v: corner $i closes again (changed $c)" || fail "$v: corner $i closes again (changed $c)"
+    done
+  else fail "$v: corner checks are defined"; fi
+
+  run_steps macros.to_battle && pass "$v: battle steps ran" || fail "$v: battle steps ran"
+  f1=$(shot "battle1-$v"); sleep 2; f2=$(shot "battle2-$v")
+  # The steps running proves little: a tap that missed would leave us on the map. The unit column must match.
+  c=$(H region-changed "$(param battle_golden)" "$f2" $(param battle_region | tr -d '[]' | tr ',' ' '))
+  H at-most "$c" "$(param battle_region_max_change)" && pass "$v: reached battle (unit column changed $c)" || fail "$v: reached battle (unit column changed $c)"
+  H pixels-differ "$f1" "$f2" && pass "$v: frames advance in battle" || fail "$v: frames advance in battle"
+  H pillarbox "$f2" && pass "$v: black pillars around a 3:2 game" || fail "$v: black pillars around a 3:2 game"
+
+  pid=$(app_pid); cycles=$(param lock_cycles); good=0
+  # A secure lock can't be dismissed over adb, so locking would strand the rest of the gate.
+  if secure_lock; then
+    fail "$v: lock cycles not run: this phone has a secure screen lock (see HANDOFF.md)"
+    cycles=0; good=-1
+  fi
+  for ((i = 1; i <= cycles; i++)); do
+    adbs shell input keyevent SLEEP; sleep 2; wake; sleep 3
+    s=$(shot "lock-$v"); same=$(app_pid)
+    # The focus check stops a lock screen from counting as a resumed game.
+    if [ -n "$pid" ] && [ "$same" = "$pid" ] && focused && H not-black "$s" >/dev/null; then good=$((good + 1)); fi
+  done
+  if [ "$good" != -1 ]; then
+    [ "$good" = "$cycles" ] && pass "$v: $cycles lock cycles keep the PID and non-black frames" || fail "$v: lock cycles ($good of $cycles good)"
+  fi
+  common_checks "$v"
+
+  # Resuming a battle opens the game's own pause menu, which is silent by design. Music returns on unpause.
+  run_steps macros.unpause && pass "$v: unpause steps ran" || fail "$v: unpause steps ran"
+  sleep 3
+  adbs shell dumpsys audio | tr -d '\r' >"$EV/audio-$v.txt"
+  grep -Eq "u/pid:[^ ]*/$pid .*state:started" "$EV/audio-$v.txt" && pass "$v: dumpsys audio shows an active player after resume" || fail "$v: dumpsys audio shows an active player after resume"
+
+  run_steps macros.exit_game && pass "$v: exit steps ran" || fail "$v: exit steps ran"
+  sleep 3
+  [ -z "$(app_pid)" ] && pass "$v: exit ends the process" || fail "$v: exit ends the process"
+  # Read the log before clearing it, or a crash during exit would go unseen.
+  adbs logcat -d >"$EV/logcat-exit-$v.txt"
+  grep -E 'FATAL|JNI DETECTED|dlopen failed' "$EV/logcat-exit-$v.txt" | grep -Ev "$(param logcat_ignore_regex)" >"$EV/logcat-exit-hits-$v.txt"
+  [ -s "$EV/logcat-exit-hits-$v.txt" ] && fail "$v: no crash during exit (see logcat-exit-hits-$v.txt)" || pass "$v: no crash during exit"
+  adbs logcat -c
+  adbs shell monkey -p "$PKG" -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1
+  sleep "$(param launch_wait_sec)"
+  common_checks "$v"
+  s=$(shot "relaunch-$v")
+  H not-black "$s" >/dev/null && pass "$v: back then relaunch works without force-stop" || fail "$v: back then relaunch works without force-stop"
+  # A drawn title proves little (trap 4). The tap must work too.
+  run_steps macros.title_tap; sleep 3
+  a=$(shot "relaunch-tap-$v")
+  c=$(H pixels-changed "$s" "$a")
+  H at-least "$c" "$(param title_tap_min_change)" && pass "$v: a tap works after relaunch (changed $c)" || fail "$v: a tap works after relaunch (changed $c)"
+  H ogg-methods "$ORIGINAL" "$(apk_path "$v")" >/dev/null && pass "$v: all 68 oggs keep their storage method" || fail "$v: ogg storage methods"
+  adbs shell am force-stop "$PKG"
+done
+owner_confirmed audio && pass "owner confirmed BGM and SFX by ear (docs/OWNER.md)" || fail "owner confirmed BGM and SFX by ear (docs/OWNER.md needs 'audio: yes')"
+gate_end

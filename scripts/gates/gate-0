@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# Zero-change rebuild. No phone needed.
+source "$(dirname "$0")/../env.sh"; source scripts/gates/lib.sh
+gate_start 0
+
+bash scripts/build all >"$EV/build1.txt" 2>&1 && pass "build all" || fail "build all"
+R=$(apk_path release); D=$(apk_path debug)
+T=$EV/tmp; mkdir -p "$T/o" "$T/r1" "$T/r2" "$T/so" "$T/soo"
+
+H zip-compare "$ORIGINAL" "$R" >"$EV/zip-compare.txt"; rc=$?
+cat "$EV/zip-compare.txt"
+[ $rc = 0 ] && pass "entry CRCs and storage methods: only classes.dex and AndroidManifest.xml may differ" \
+  || fail "entry CRCs and storage methods: only classes.dex and AndroidManifest.xml may differ"
+H ogg-methods "$ORIGINAL" "$R" >"$EV/oggs.txt" && pass "all 68 oggs keep their storage method ($(cat "$EV/oggs.txt"))" || fail "ogg storage methods"
+
+aapt2 dump badging "$ORIGINAL" >"$EV/badging-original.txt" 2>&1
+aapt2 dump badging "$R" >"$EV/badging-release.txt" 2>&1
+aapt2 dump badging "$D" >"$EV/badging-debug.txt" 2>&1
+cmp -s "$EV/badging-original.txt" "$EV/badging-release.txt" && pass "badging matches the original" || fail "badging matches the original"
+if [ "$(diff "$EV/badging-original.txt" "$EV/badging-debug.txt" | grep -E '^[<>]' | tr -d '\r')" = "> application-debuggable" ]; then
+  pass "debug badging differs only by application-debuggable"; else fail "debug badging differs only by application-debuggable"; fi
+
+unzip -q -o "$ORIGINAL" classes.dex -d "$T/o"; unzip -q -o "$R" classes.dex -d "$T/r1"
+counts() {
+  dexdump -f "$1/classes.dex" 2>/dev/null | tr -d '\r' | awk '/class_defs_size/{c=$3} /method_ids_size/{m=$3} END{print c, m}'
+  dexdump "$1/classes.dex" 2>/dev/null | tr -d '\r' | awk '/Direct methods|Virtual methods/{on=1;next} /Instance fields|Static fields|source_file_idx|Class #/{on=0} on&&/^ *#[0-9]+ *: \(in/{n++} END{print "defined", n}'
+}
+counts "$T/o" >"$EV/dex-original.txt"; counts "$T/r1" >"$EV/dex-release.txt"; cat "$EV/dex-release.txt"
+[ "$(sed -n 1p "$EV/dex-release.txt")" = "$(param dex.classes) $(param dex.method_ids)" ] && pass "dex has 346 classes and the expected method ids" || fail "dex class and method id counts"
+grep -Eq '^defined [0-9]+$' "$EV/dex-release.txt" && cmp -s "$EV/dex-original.txt" "$EV/dex-release.txt" && pass "dex counts match the original, including defined methods" || fail "dex counts match the original"
+
+unzip -q -o "$ORIGINAL" lib/armeabi/libgameDSO.so -d "$T/soo"; unzip -q -o "$R" lib/armeabi/libgameDSO.so -d "$T/so"
+[ "$(sha "$T/so/lib/armeabi/libgameDSO.so")" = "$(sha "$T/soo/lib/armeabi/libgameDSO.so")" ] && pass "libgameDSO.so hash unchanged" || fail "libgameDSO.so hash unchanged"
+
+for v in "$R" "$D"; do
+  apksigner.bat verify --verbose --min-sdk-version 7 "$v" 2>&1 | tr -d '\r' >"$EV/verify-$(basename "$v").txt"
+  for s in "v1 scheme (JAR signing)" "v2 scheme (APK Signature Scheme v2)" "v3 scheme (APK Signature Scheme v3)"; do
+    grep -Fq "Verified using $s: true" "$EV/verify-$(basename "$v").txt" && pass "$(basename "$v") verifies: $s" || fail "$(basename "$v") verifies: $s"
+  done
+done
+
+first=$(sha "$T/r1/classes.dex")
+bash scripts/build release >"$EV/build2.txt" 2>&1 && pass "second build" || fail "second build"
+unzip -q -o "$R" classes.dex -d "$T/r2"
+[ "$(sha "$T/r2/classes.dex")" = "$first" ] && pass "second build has the same dex hash ($first)" || fail "second build has the same dex hash"
+
+# Section 6.2 fallback: apktool cannot rebuild this manifest, so prove the binary patcher works.
+unzip -q -o "$ORIGINAL" AndroidManifest.xml -d "$T/o"
+tree() { aapt2 dump xmltree --file AndroidManifest.xml "$1" 2>&1 | tr -d '\r'; }
+node scripts/lib/axml.mjs "$T/o/AndroidManifest.xml" "$T/same.xml" scripts/gates/fallback-identity.json >/dev/null
+java scripts/Transplant.java "$ORIGINAL" "$T/same.apk" "AndroidManifest.xml=$T/same.xml" >/dev/null
+tree "$ORIGINAL" >"$EV/tree-original.txt"; tree "$T/same.apk" >"$EV/tree-roundtrip.txt"
+grep -q ' E: manifest' "$EV/tree-original.txt" && cmp -s "$EV/tree-original.txt" "$EV/tree-roundtrip.txt" && pass "manifest patcher round trip keeps the full tree" || fail "manifest patcher round trip keeps the full tree"
+
+node scripts/lib/axml.mjs "$T/o/AndroidManifest.xml" "$T/edit.xml" scripts/gates/fallback-test.json >"$EV/fallback-ops.txt" \
+  && pass "manifest patcher ops apply" || fail "manifest patcher ops apply"
+java scripts/Transplant.java "$ORIGINAL" "$T/edit.apk" "AndroidManifest.xml=$T/edit.xml" >/dev/null
+tree "$T/edit.apk" >"$EV/tree-edit.txt"
+aapt2 dump badging "$T/edit.apk" 2>&1 | tr -d '\r' >"$EV/badging-edit.txt"
+grep -q "targetSdkVersion:'28'" "$EV/badging-edit.txt" && pass "patched manifest: target 28" || fail "patched manifest: target 28"
+# The manifest also has a permission-group with this name, so match the uses-permission line only.
+grep -q "uses-permission: name='android.permission.INTERNET'" "$EV/badging-original.txt" && pass "original has uses-permission INTERNET" || fail "original has uses-permission INTERNET"
+grep -q "uses-permission: name='android.permission.INTERNET'" "$EV/badging-edit.txt" && fail "patched manifest: INTERNET permission removed" || pass "patched manifest: INTERNET permission removed"
+[ "$(diff "$EV/tree-original.txt" "$EV/tree-edit.txt" | grep -c '^[<>]')" = 7 ] && pass "patched manifest: only the expected lines changed" || fail "patched manifest: only the expected lines changed"
+grep -q "debuggable(0x0101000f)=true" "$EV/tree-edit.txt" && pass "patched manifest: debuggable set" || fail "patched manifest: debuggable set"
+grep -q "configChanges(0x0101001f)=0x00000da0" "$EV/tree-edit.txt" && pass "patched manifest: configChanges set" || fail "patched manifest: configChanges set"
+[ "$(grep -c ' E: ' "$EV/tree-edit.txt")" = "$(( $(grep -c ' E: ' "$EV/tree-original.txt") - 1 ))" ] && pass "patched manifest: exactly one element removed" || fail "patched manifest: exactly one element removed"
+grep -q "package: name='$PKG' versionCode='102'" "$EV/badging-edit.txt" && pass "patched manifest: package intact" || fail "patched manifest: package intact"
+
+rm -rf "$T"
+[ -z "$(git ls-files | LC_ALL=C sort | LC_ALL=C comm -23 - scripts/public-files.txt)" ] && pass "only files in scripts/public-files.txt are tracked" || fail "only files in scripts/public-files.txt are tracked"
+gate_end

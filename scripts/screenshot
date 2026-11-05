@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Saves a screenshot on the device, then pulls it. Usage: scripts/screenshot [out.png]
+source "$(dirname "$0")/env.sh"
+out=${1:-logs/shot-$(date +%Y%m%d-%H%M%S).png}
+mkdir -p "$(dirname "$out")"
+adbs shell screencap -p /data/local/tmp/arelwars-shot.png
+adbs pull /data/local/tmp/arelwars-shot.png "$out" >/dev/null
+adbs shell rm -f /data/local/tmp/arelwars-shot.png
+echo "$out"

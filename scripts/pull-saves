@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# Backs up saves: files/Save%d.dat, Sng%d.dat and option.sav, always together and byte-exact (audit Q2).
+# Restoring only some of them trips the game's XOR check. Usage:
+#   scripts/pull-saves [debug|release] [out-dir]    copy the saves off the phone; prints the backup folder
+#   scripts/pull-saves --restore DIR                debug builds only; backs up the current saves first
+source "$(dirname "$0")/env.sh"
+MIRROR=/sdcard/Android/data/$PKG/files/saves   # written by release builds from Phase 6
+
+# Hash of a whole save set: names and contents.
+set_hash() { (cd "$1" && sha256sum -b * | sha256sum | cut -d' ' -f1); }
+save_names() { adbs exec-out run-as "$PKG" ls -1 files | tr -d '\r' | grep -E '^(Save[0-9]+\.dat|Sng[0-9]+\.dat|option\.sav)$' || true; }
+pull_debug() {
+  local dir=$1 name
+  mkdir -p "$dir"
+  for name in $(save_names); do adbs exec-out run-as "$PKG" cat "files/$name" >"$dir/$name"; done
+}
+stamp() { date +%Y%m%d-%H%M%S; }
+
+if [ "${1:-}" = --hash ]; then set_hash "${2:?}"; exit 0; fi
+
+if [ "${1:-}" = --restore ]; then
+  src=${2:?usage: scripts/pull-saves --restore DIR}
+  [ -s "$src/option.sav" ] || { echo "$src has no option.sav" >&2; exit 1; }
+  backup=logs/save-backups/before-restore-$(stamp)
+  pull_debug "$backup"
+  [ -n "$(ls -A "$backup")" ] || { echo "could not back up the current saves, not restoring" >&2; exit 1; }
+  adbs shell am force-stop "$PKG"
+  for name in $(save_names); do adbs exec-out run-as "$PKG" rm -f "files/$name"; done
+  # exec-in, because adb shell strips \r from piped data and would corrupt a save.
+  for f in "$src"/*; do
+    [ -f "$f" ] || continue
+    case "$(basename "$f")" in Save*.dat|Sng*.dat|option.sav) ;; *) continue ;; esac
+    adbs exec-in "run-as $PKG sh -c 'cat > files/$(basename "$f")'" <"$f"
+    # A separate command: exec-in ends at stdin EOF, so a chained chmod does not run.
+    adbs exec-out run-as "$PKG" chmod 600 "files/$(basename "$f")"
+  done
+  check=$(mktemp -d -p logs/save-backups)
+  pull_debug "$check"
+  if [ "$(set_hash "$src")" != "$(set_hash "$check")" ]; then
+    rm -rf "$check"
+    echo "restore did not read back byte-exact; previous saves: $backup" >&2
+    exit 1
+  fi
+  rm -rf "$check"
+  echo "restored $src (previous saves: $backup)"
+  exit 0
+fi
+
+variant=${1:-debug}
+base=${2:-logs/save-backups}
+out=$base/saves-$variant-$(stamp)
+mkdir -p "$out"
+case "$variant" in
+  debug) pull_debug "$out" ;;
+  release) adbs pull "$MIRROR/." "$out" >/dev/null ;;
+  *) echo "usage: scripts/pull-saves [debug|release] [out-dir]" >&2; exit 2 ;;
+esac
+[ -n "$(ls -A "$out")" ] || { echo "no save data pulled" >&2; rmdir "$out"; exit 1; }
+set_hash "$out" >"$out.sha256"
+echo "$out"

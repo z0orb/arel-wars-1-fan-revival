@@ -1,0 +1,7 @@
+{
+  "entry": "lib/armeabi/libgameDSO.so",
+  "reason": "isEnglish calls a ()Z Java method through CallStaticObjectMethod. CheckJNI aborts on it, and without CheckJNI ART wraps the boolean as an object reference. Retarget the BL to the library's own CallStaticBooleanMethod helper.",
+  "edits": [
+    { "offset": "0x4613a", "before": "fff7a9fe", "after": "89f04bfd" }
+  ]
+}

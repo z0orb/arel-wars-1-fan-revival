@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+# Offline loop and save durability. Usage: gate-6 [debug|release]
+# Opens and confirms Export and Import, so it works only on the test save in docs/testsave.
+# The saves on the phone are backed up first and put back at the end.
+source "$(dirname "$0")/../env.sh"; source scripts/gates/lib.sh
+gate_start 6
+v=${1:-debug}
+saved=""
+# Hash of the whole save set (files/Save%d.dat, Sng%d.dat, option.sav), through the same route a backup uses.
+save_hash() {
+  local d o
+  d=$EV/save-now
+  rm -rf "$d" "$d".sha256 "$d"/*
+  o=$(bash scripts/pull-saves "$v" "$d" 2>/dev/null | tail -1) && [ -n "$o" ] && cat "$o.sha256"
+}
+region_check() { # image golden-param max-change-param box-param: exit 0 when the box matches the golden
+  local c
+  c=$(H region-changed "$1" "$(param "$2")" $(H box "$4"))
+  echo "$c" >"$1.change"
+  H at-most "$c" "$(param "$3")"
+}
+
+usable() { # name: a tap on COMMUNITY must change the screen, then it closes again
+  local a b c
+  a=$(shot "$1")
+  run_steps macros.usable_probe
+  b=$(shot "$1-probe")
+  c=$(H pixels-changed "$a" "$b")
+  run_steps macros.usable_probe_back
+  echo "$c" >"$b.change"
+  H at-least "$c" "$(param corner_min_change)"
+}
+
+# Back up what is on the phone, then swap in the test save. Restoring needs a debuggable build.
+bash scripts/install debug >"$EV/install-start.txt" 2>&1 && pass "debug installed for the save swap" || fail "debug installed for the save swap"
+if [ -n "$(adbs exec-out run-as "$PKG" ls -1 files 2>/dev/null | tr -d '\r' | grep -E '^option\.sav$')" ]; then
+  saved=$(bash scripts/pull-saves debug "$EV/phone-saves" | tail -1)
+  [ -s "$saved/option.sav" ] && pass "phone saves backed up" || { fail "phone saves backed up"; gate_end; }
+else
+  echo "no saves on the phone to back up"
+fi
+bash scripts/pull-saves --restore "$(param test_save)" >"$EV/restore-test.txt" 2>&1 && pass "test save restored" || { fail "test save restored"; gate_end; }
+
+install_variant "$v" && pass "installed $v" || fail "installed $v"
+launch
+run_steps macros.to_worldmap
+h0=$(save_hash)
+[ -n "$h0" ] && pass "save hash readable through the $v route" || fail "save hash readable through the $v route"
+
+# Each online menu must show the offline message within the limit, then return to a usable map.
+limit=$(param menu_return_sec); pid=$(app_pid)
+n=$(H count online_menus)
+if [ -n "$n" ] && [ "$n" -gt 0 ]; then
+  for ((i = 0; i < n; i++)); do
+    run_steps "online_menus.$i" || fail "online menu $i steps"
+    sleep "$limit"
+    s=$(shot "menu$i")
+    region_check "$s" offline_popup_golden offline_region_max_change offline_popup_region && pass "online menu $i shows the offline message within ${limit}s" || fail "online menu $i shows the offline message within ${limit}s"
+    run_steps "online_returns.$i" || fail "online menu $i return steps"
+    usable "menu$i-return" && [ -n "$pid" ] && [ "$(app_pid)" = "$pid" ] && pass "online menu $i returns to a usable map, no crash or exit" || fail "online menu $i returns to a usable map, no crash or exit"
+  done
+else fail "online menus are defined"; fi
+
+# Real-money purchases show a message and credit nothing.
+n=$(H count purchase_menus)
+if [ -n "$n" ] && [ "$n" -gt 0 ]; then
+  for ((i = 0; i < n; i++)); do
+    run_steps "purchase_menus.$i" || fail "purchase $i steps"
+    s=$(shot "buy$i")
+    region_check "$s" purchase_toast_golden offline_region_max_change purchase_toast_region && pass "purchase $i shows the offline message" || fail "purchase $i shows the offline message"
+    sleep 5
+    run_steps "purchase_returns.$i" || fail "purchase $i return steps"
+    usable "buy$i-return" && [ "$(app_pid)" = "$pid" ] && pass "purchase $i returns to a usable map, no crash or exit" || fail "purchase $i returns to a usable map, no crash or exit"
+  done
+else fail "purchase menus are defined"; fi
+
+sleep 3
+[ -n "$h0" ] && [ "$(save_hash)" = "$h0" ] && pass "online menus and purchases leave the save hash unchanged" || fail "online menus and purchases leave the save hash unchanged"
+
+for m in open_export_and_back_out open_import_and_back_out; do
+  run_steps "macros.$m" && pass "$m ran" || fail "$m ran"
+  sleep 3
+  [ -n "$h0" ] && [ "$(save_hash)" = "$h0" ] && pass "$m leaves the save hash unchanged" || fail "$m leaves the save hash unchanged"
+done
+
+# A fresh start, because closing a menu hides the stage panel the macro needs.
+launch
+run_steps macros.to_worldmap
+run_steps macros.clear_stage && pass "stage clear steps ran" || fail "stage clear steps ran"
+s=$(shot cleared)
+# A loss also changes the save (EXP), so the next stage's panel is the proof of a clear.
+region_check "$s" next_stage_golden next_stage_max_change next_stage_region && pass "the next stage is open on the map" || fail "the next stage is open on the map"
+sleep 10
+h2=$(save_hash)
+[ -n "$h2" ] && [ "$h0" != "$h2" ] && pass "save hash changes after clearing a stage" || fail "save hash changes after clearing a stage"
+
+adbs shell am force-stop "$PKG"
+launch
+[ -n "$h2" ] && [ "$(save_hash)" = "$h2" ] && pass "save survives force-stop and relaunch" || fail "save survives force-stop and relaunch"
+run_steps macros.load_progress && pass "load steps ran" || fail "load steps ran"
+s=$(shot load-after-relaunch)
+region_check "$s" next_stage_golden next_stage_max_change next_stage_region && pass "progress loads after relaunch" || fail "progress loads after relaunch"
+
+install_variant "$v" && pass "adb install -r" || fail "adb install -r"
+launch
+[ -n "$h2" ] && [ "$(save_hash)" = "$h2" ] && pass "save survives adb install -r" || fail "save survives adb install -r"
+run_steps macros.load_progress && pass "load steps ran after update" || fail "load steps ran after update"
+s=$(shot load-after-update)
+region_check "$s" next_stage_golden next_stage_max_change next_stage_region && pass "progress loads after adb install -r" || fail "progress loads after adb install -r"
+
+common_checks "$v"
+grep -q 'readAssete IOException' "$EV/logcat-$v.txt" && fail "logcat has no readAssete IOException" || pass "logcat has no readAssete IOException"
+
+backup=$(bash scripts/pull-saves "$v" "$EV/backup" | tail -1)
+[ -s "$backup/option.sav" ] && pass "pull-saves produced $backup" || fail "pull-saves produced a backup"
+
+# The mirror and the real files must agree, so a release backup is as good as a debug one.
+if [ "$v" = debug ]; then
+  m=$(bash scripts/pull-saves release "$EV/mirror" | tail -1)
+  [ "$(cat "$m.sha256")" = "$(cat "$backup.sha256")" ] && pass "save mirror equals the real saves" || fail "save mirror equals the real saves"
+fi
+
+# Restore needs a debuggable build, so a release backup is restored by way of debug.
+adbs shell am force-stop "$PKG"
+bash scripts/install debug >"$EV/install-restore.txt" 2>&1
+# Wreck the saves first, or a restore that did nothing would still pass.
+bash scripts/pull-saves --restore "$(param test_save)" >"$EV/restore-wreck.txt" 2>&1
+bash scripts/pull-saves --restore "$backup" >"$EV/restore.txt" 2>&1 && pass "restore ran" || fail "restore ran"
+install_variant "$v"
+launch
+[ "$(save_hash)" = "$(cat "$backup.sha256")" ] && pass "restored save matches the backup" || fail "restored save matches the backup"
+run_steps macros.load_progress && pass "load steps ran after restore" || fail "load steps ran after restore"
+s=$(shot load-after-restore)
+region_check "$s" next_stage_golden next_stage_max_change next_stage_region && pass "restored save loads" || fail "restored save loads"
+adbs shell am force-stop "$PKG"
+
+# Put the phone's own saves back.
+if [ -n "$saved" ]; then
+  bash scripts/install debug >"$EV/install-end.txt" 2>&1
+  bash scripts/pull-saves --restore "$saved" >"$EV/restore-end.txt" 2>&1 && pass "phone saves put back" || fail "phone saves put back ($saved)"
+  install_variant "$v"
+fi
+gate_end

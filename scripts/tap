@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Injects a tap. Usage: scripts/tap X Y
+source "$(dirname "$0")/env.sh"
+[ $# -eq 2 ] || { echo "usage: scripts/tap X Y" >&2; exit 2; }
+adbs shell input tap "$1" "$2"

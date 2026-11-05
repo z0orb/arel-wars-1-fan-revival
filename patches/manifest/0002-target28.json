@@ -1,0 +1,4 @@
+[
+  { "op": "set-attr", "tag": "uses-sdk", "attr": "targetSdkVersion", "id": "0x01010270", "type": "int", "value": 28 },
+  { "op": "set-attr", "tag": "activity", "attr": "configChanges", "id": "0x0101001f", "type": "hex", "value": "0xda0" }
+]

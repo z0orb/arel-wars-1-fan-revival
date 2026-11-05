@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Dumps logcat to a file under logs/. Logs may hold identifiers, so keep them private.
+# Usage: scripts/logcat [out-file]
+source "$(dirname "$0")/env.sh"
+out=${1:-logs/logcat-$(date +%Y%m%d-%H%M%S).txt}
+mkdir -p "$(dirname "$out")"
+adbs logcat -d >"$out"
+echo "$out"

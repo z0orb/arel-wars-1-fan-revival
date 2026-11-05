@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Installs a built variant as an update. Usage: scripts/install [release|debug] [--bypass]
+# This project has no uninstall script on purpose: uninstalling erases saves.
+source "$(dirname "$0")/env.sh"
+variant=${1:-release}
+flags=(-r)
+[ "${2:-}" = --bypass ] && flags+=(--bypass-low-target-sdk-block)
+shopt -s nullglob
+smali_patches=(patches/smali/*.patch)
+if [ ${#smali_patches[@]} -eq 0 ]; then
+  echo "refusing: no smali patches exist, so this build is unpatched game code" >&2
+  exit 1
+fi
+apk=$(apk_path "$variant")
+[ -f "$apk" ] || { echo "$apk not built" >&2; exit 1; }
+[ "$(sha "$apk")" = "$(cat "$apk.sha256")" ] || { echo "$apk does not match its recorded hash" >&2; exit 1; }
+# HyperOS's AdbInstallActivity sometimes closes itself right after its process cold-starts, with no
+# tap (logs/gate-3-20261105-161132). That reports "canceled by user". Retry only that exact error.
+set +e
+for attempt in 1 2 3; do
+  out=$(adbs install "${flags[@]}" "$apk" 2>&1); rc=$?
+  echo "$out"
+  [ $rc -eq 0 ] && exit 0
+  echo "$out" | grep -q INSTALL_FAILED_USER_RESTRICTED || exit $rc
+  echo "attempt $attempt: HyperOS closed its install check, retrying"
+  sleep 5
+done
+exit $rc

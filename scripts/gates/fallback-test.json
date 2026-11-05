@@ -1,0 +1,6 @@
+[
+  { "op": "remove-element", "tag": "uses-permission", "name": "android.permission.INTERNET" },
+  { "op": "set-attr", "tag": "uses-sdk", "attr": "targetSdkVersion", "id": "0x01010270", "type": "int", "value": 28 },
+  { "op": "set-attr", "tag": "activity", "name": ".DRMLicensing", "attr": "configChanges", "id": "0x0101001f", "type": "hex", "value": "0xda0" },
+  { "op": "set-attr", "tag": "application", "attr": "debuggable", "id": "0x0101000f", "type": "bool", "value": true }
+]
