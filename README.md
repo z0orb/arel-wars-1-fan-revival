@@ -30,8 +30,11 @@ Tested on one phone: a Redmi Note 12 on Android 15 (HyperOS 2).
 ## What doesn't
 
 - **Online play** of any kind. That is by design.
-- **Cash is hard to earn offline.** In the original game Cash came mostly from purchases and PvP. Items priced only in Cash may be out of reach. This is still open.
 - Only one phone has been tested.
+
+## One balance change
+
+In the original game, Cash came from real-money purchases and PvP. Offline, a normal playthrough earned none, so the six Cash-only heroes and most items were out of reach. **Each stage win now also pays 2 Cash for every Gold it pays.** A full Normal playthrough gives about 87,000 Cash, and Normal plus Hard about 247,000. Everything Cash-only adds up to about 173,000. A loss pays nothing, as before.
 
 ## How it is built
 
@@ -39,7 +42,7 @@ Tested on one phone: a Redmi Note 12 on Android 15 (HyperOS 2).
 
 1. Decodes the code with apktool, and applies `patches/smali/*.patch`. These are not published, because they contain decompiled game code.
 2. Edits the binary manifest with `scripts/lib/axml.mjs`, using `patches/manifest/*.json`.
-3. Byte-patches the native library with `patches/binary/*.json`. Each patch checks the expected bytes before changing anything.
+3. Byte-patches the native library with `patches/binary/*.json`. Each patch checks the expected bytes before changing anything. `scripts/lib/gen-textrel.mjs` and `gen-cash.mjs` generate two of them from the original library.
 4. Replaces a few strings in the game's text tables with `scripts/lib/zt1text.mjs`.
 5. Copies the original APK entry by entry (`scripts/Transplant.java`), replacing only the changed entries and keeping every storage method. This keeps the audio files intact.
 6. Aligns and signs it.

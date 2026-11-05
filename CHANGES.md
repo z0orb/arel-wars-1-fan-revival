@@ -29,4 +29,5 @@ Every change made to the original APK, in plain language, with the reason. Each 
 - **Export and Import say they are unavailable and that your game data will not change.** The original text warned that your data would be deleted, which cannot happen offline.
 - **The Data Management text says online backup is unavailable** and that your data stays on the phone.
 - **Real-money Cash and Gold purchases show "Purchases are unavailable in this offline version."** Nothing is reported back to the game, so nothing can be credited by mistake.
+- **Stage wins pay Cash: 2 Cash per Gold earned.** Offline, Cash could only come from Hard-mode replays, a few at a time, so Cash-only heroes and items were unreachable. The result screen's Gold call now goes through a small helper that also adds the Cash, using the game's own checked setter, so the save's Cash checksum stays valid. The helper lives in a trial-version function the game never calls. Spending Cash works as before.
 - **A copy of the save is kept up to date** in `Android/data/com.gamevil.eruelwars.global/files/saves`, which can be copied off the phone over USB without root. It never replaces a save with an empty one.

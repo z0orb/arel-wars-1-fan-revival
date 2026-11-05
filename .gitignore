@@ -18,6 +18,7 @@
 !patches/binary/0001-isenglish-jni.json
 !patches/binary/0002-textrel.json
 !patches/binary/0003-signed-pointers.json
+!patches/binary/0004-cash-reward.json
 !patches/manifest/0001-strip.json
 !patches/manifest/0002-target28.json
 !patches/manifest/0003-landscape.json
@@ -44,6 +45,7 @@
 !scripts/lib/axml.mjs
 !scripts/lib/bytepatch.mjs
 !scripts/lib/debuggable.json
+!scripts/lib/gen-cash.mjs
 !scripts/lib/gen-java-smali.sh
 !scripts/lib/gen-stubs.mjs
 !scripts/lib/gen-textrel.mjs
