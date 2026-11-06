@@ -3,7 +3,7 @@
 <p align="center"><b>Gamevil's 2012 tower-war RPG, playable again on a modern Android phone.<br>Fully offline. No account, no server, no ads.</b></p>
 
 <p align="center">
-  <a href="../../releases/latest"><img alt="Download the latest release" src="https://img.shields.io/github/v/release/z0orb/arel-wars-1-fan-revival?label=download&style=for-the-badge"></a>
+  <a href="https://github.com/z0orb/arel-wars-1-fan-revival/releases/latest"><img alt="Download APK" src="https://img.shields.io/badge/Download-APK-2ea44f?style=for-the-badge&logo=android&logoColor=white"></a>
   <img alt="Android 15 tested" src="https://img.shields.io/badge/Android_15-tested-3ddc84?style=for-the-badge&logo=android&logoColor=white">
   <img alt="No internet permission" src="https://img.shields.io/badge/network-none-555?style=for-the-badge">
 </p>
@@ -21,7 +21,7 @@
 
 Arel Wars (Android v1.0.2) stopped working years ago. Its servers are gone, it stops at a network check on every start, and Android 15 refuses to install it at all. This project patches the original APK so it installs and runs on current Android, with every online feature cleanly switched off and saves that survive updates.
 
-**Download the ready-to-install APK from [Releases](../../releases/latest).** The source tree holds the build tooling, patch specs and test gates. It does not contain the game's code or assets.
+**Download the ready-to-install APK from [Releases](https://github.com/z0orb/arel-wars-1-fan-revival/releases/latest).** The source tree holds the build tooling, patch specs and test gates. It does not contain the game's code or assets.
 
 ---
 
@@ -73,7 +73,7 @@ Tested on a Redmi Note 12, Android 15 (HyperOS 2). Each phase passed an automate
 
 ## Installing
 
-You need `arelwars-release.apk` from [the latest release](../../releases/latest) and an Android phone that can still run **32-bit ARM apps**. The game's native library is 32-bit only. Some recent phones, such as the Pixel 7 and later, have dropped 32-bit support and cannot run it. Testing was on Android 15. Older versions should work, since the APK declares SDK 7 as its minimum, but they are untested.
+You need `arelwars-release.apk` from [the latest release](https://github.com/z0orb/arel-wars-1-fan-revival/releases/latest) and an Android phone that can still run **32-bit ARM apps**. The game's native library is 32-bit only. Some recent phones, such as the Pixel 7 and later, have dropped 32-bit support and cannot run it. Testing was on Android 15. Older versions should work, since the APK declares SDK 7 as its minimum, but they are untested.
 
 **With a PC (adb):**
 
