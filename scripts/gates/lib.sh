@@ -95,3 +95,28 @@ common_checks() {
   if [ -s "$hits" ]; then fail "$variant: logcat clean (see $(basename "$hits"))"; else pass "$variant: logcat clean"; fi
 }
 owner_confirmed() { grep -Eq "^$1: yes\b" docs/OWNER.md 2>/dev/null; }
+
+# Saves are real from Phase 6 on. Gates that play on the test save back up the phone's saves first,
+# then swap in docs/testsave (needs the debug build for run-as). SAVED is the backup, or empty if none.
+swap_in_test_save() {
+  SAVED=""
+  bash scripts/install debug >"$EV/install-swap.txt" 2>&1 || { fail "debug installed for the save swap"; return 1; }
+  if adbs exec-out run-as "$PKG" ls -1 files 2>/dev/null | tr -d '\r' | grep -qx 'option\.sav'; then
+    SAVED=$(bash scripts/pull-saves debug "$EV/phone-saves" | tail -1)
+    [ -s "$SAVED/option.sav" ] || { fail "phone saves backed up"; return 1; }
+    pass "phone saves backed up to $SAVED"
+  else
+    echo "no saves on the phone to back up"
+  fi
+  bash scripts/pull-saves --restore "$(param test_save)" >"$EV/restore-test.txt" 2>&1 || { fail "test save swapped in"; return 1; }
+  pass "test save swapped in"
+}
+# Puts back what swap_in_test_save backed up, then reinstalls the given variant.
+put_back_saves() {
+  adbs shell am force-stop "$PKG"
+  if [ -n "${SAVED:-}" ]; then
+    bash scripts/install debug >"$EV/install-putback.txt" 2>&1
+    bash scripts/pull-saves --restore "$SAVED" >"$EV/restore-putback.txt" 2>&1 && pass "phone saves put back" || fail "phone saves put back ($SAVED)"
+  fi
+  install_variant "$1"
+}

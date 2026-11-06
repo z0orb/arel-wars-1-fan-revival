@@ -12,6 +12,12 @@ patches/manifest/0002-target28.json
 patches/manifest/0003-landscape.json
 patches/src/com/gamevil/nexus2/ArelOffline.java
 patches/src/com/gamevil/nexus2/ArelSaveMirror.java
+screenshots/battle.png
+screenshots/offline.png
+screenshots/shop.png
+screenshots/title.png
+screenshots/victory.png
+screenshots/world-map.png
 scripts/Transplant.java
 scripts/build
 scripts/env.sh
@@ -29,6 +35,7 @@ scripts/gates/gate-7
 scripts/gates/helpers.mjs
 scripts/gates/lib.sh
 scripts/gates/params.json
+scripts/gates/soak
 scripts/install
 scripts/lib/axml.mjs
 scripts/lib/bytepatch.mjs

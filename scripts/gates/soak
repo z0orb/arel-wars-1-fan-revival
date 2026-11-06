@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# Monkey soak on release (PLAN.md Phase 7). Usage: soak [events]
+# Plays on the test save in docs/testsave; the phone's own saves are backed up first and put back after.
+# monkey runs detached on the phone, so an adb drop does not end it; this script polls until it exits.
+# Logcat at W and above (FATAL, JNI DETECTED and dlopen failed are all W or higher) is streamed to a file (the ring buffer would not hold hours of it), and Android's dropbox
+# crash records for our package are compared before and after, as a check that survives lost log lines.
+source "$(dirname "$0")/../env.sh"; source scripts/gates/lib.sh
+gate_start soak
+events=${1:-$(param soak_events)}
+MON=/data/local/tmp/arelwars-monkey.txt
+dropbox_count() {
+  local n=0 t
+  for t in data_app_crash data_app_native_crash data_app_anr; do
+    n=$((n + $(adbs shell dumpsys dropbox --print "$t" 2>/dev/null | tr -d '\r' | grep -c "Process: $PKG")))
+  done
+  echo "$n"
+}
+restore_bar() { adbs shell cmd statusbar send-disable-flag none >/dev/null 2>&1; }
+swap_in_test_save || gate_end
+install_variant release && pass "release installed" || fail "release installed"
+# The 3-button nav bar and the shade sit inside monkey's touch area. Block home, recents and the shade
+# so it cannot reach quick settings (Wi-Fi, data, airplane mode). Re-enabled on every exit path.
+trap restore_bar EXIT
+adbs shell cmd statusbar send-disable-flag home recents statusbar-expansion && pass "status bar expansion, home and recents blocked" || fail "status bar flags set"
+before=$(dropbox_count); echo "dropbox crash/ANR records for $PKG before: $before"
+launch
+adbs logcat -c
+UID_=$(app_uid)
+# Two streams: the whole phone at W and above as evidence, and every line from our app's UID, which the
+# FATAL check reads. Other apps start in the background during a long soak and log their own failures
+# (another app's missing library failed the first full run).
+# Crashes the system logs about us from other UIDs are caught by the dropbox check.
+( while :; do adbs logcat -v threadtime '*:W' >>"$EV/logcat-soak.txt" 2>/dev/null; sleep 5; done ) &
+LOGPID=$!
+( while :; do adbs logcat -v threadtime --uid="$UID_" >>"$EV/logcat-soak-app.txt" 2>/dev/null; sleep 5; done ) &
+APPLOGPID=$!
+adbs shell rm -f "$MON"
+adbs shell "nohup monkey -p $PKG --pct-syskeys 0 --throttle 200 -v $events >$MON 2>&1 </dev/null &"
+sleep 10
+start=$(date +%s)
+# 200 ms per event, plus margin; a hung monkey ends the wait.
+limit=$(( events / 5 + 1800 ))
+while :; do
+  if adbs get-state 2>/dev/null | grep -q device; then
+    adbs shell pidof com.android.commands.monkey >/dev/null 2>&1 || break
+  else
+    echo "$(date +%T) adb not connected, waiting"
+  fi
+  [ $(( $(date +%s) - start )) -gt "$limit" ] && { echo "monkey still running after ${limit}s"; break; }
+  sleep 30
+done
+adbs pull "$MON" "$EV/monkey.txt" >/dev/null 2>&1
+restore_bar && pass "status bar flags restored"
+kill "$LOGPID" "$APPLOGPID" 2>/dev/null; sleep 1; pkill -P "$LOGPID" 2>/dev/null; pkill -P "$APPLOGPID" 2>/dev/null
+adbs logcat -d >"$EV/logcat-soak-tail.txt"
+adbs logcat -d --uid="$UID_" >"$EV/logcat-soak-app-tail.txt"
+[ -n "$UID_" ] && [ -s "$EV/logcat-soak-app.txt" ] && pass "app log stream captured (uid $UID_)" || fail "app log stream captured"
+after=$(dropbox_count); echo "dropbox crash/ANR records for $PKG after: $after"
+[ "$after" = "$before" ] && pass "no new crash or ANR records for $PKG in dropbox" || fail "new crash or ANR records in dropbox ($before to $after)"
+cat "$EV/logcat-soak-app.txt" "$EV/logcat-soak-app-tail.txt" | grep -E 'FATAL|JNI DETECTED|dlopen failed' | grep -Ev "$(param logcat_ignore_regex)" >"$EV/logcat-soak-hits.txt"
+[ -s "$EV/logcat-soak-hits.txt" ] && fail "soak logcat has no FATAL (see logcat-soak-hits.txt)" || pass "soak logcat has no FATAL"
+grep -Eq '// (CRASH|NOT RESPONDING)' "$EV/monkey.txt" && fail "monkey saw no crash or ANR" || pass "monkey saw no crash or ANR"
+grep -q "Events injected: $events" "$EV/monkey.txt" && grep -q "// Monkey finished" "$EV/monkey.txt" \
+  && pass "monkey finished all $events events" || fail "monkey finished all $events events"
+# The game's own Exit closes the process, and monkey may end on the home screen after one. Relaunch,
+# so the common checks look at a running game rather than at where the random input happened to stop.
+launch
+common_checks release
+adbs shell am force-stop "$PKG"
+put_back_saves release
+gate_end

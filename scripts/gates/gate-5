@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Stability at the final target. Usage: gate-5 [variant ...]
-# Needs an existing save in slot 1, on Stage 1, with a unit equipped and the tutorial prompt answered
-# (see the tap map in HANDOFF.md). Treat that save as throwaway: this gate quits a battle.
+# Plays on the test save in docs/testsave (slot 1, Stage 1, a unit equipped, tutorial prompt answered),
+# because it quits a battle. The phone's own saves are backed up first and put back at the end.
 source "$(dirname "$0")/../env.sh"; source scripts/gates/lib.sh
 gate_start 5
 variants=("$@"); [ ${#variants[@]} -gt 0 ] || variants=(debug release)
+swap_in_test_save || gate_end
 for v in "${variants[@]}"; do
   install_variant "$v" && pass "$v: installed" || fail "$v: installed"
   launch
@@ -79,5 +80,6 @@ for v in "${variants[@]}"; do
   H ogg-methods "$ORIGINAL" "$(apk_path "$v")" >/dev/null && pass "$v: all 68 oggs keep their storage method" || fail "$v: ogg storage methods"
   adbs shell am force-stop "$PKG"
 done
+put_back_saves "${variants[-1]}"
 owner_confirmed audio && pass "owner confirmed BGM and SFX by ear (docs/OWNER.md)" || fail "owner confirmed BGM and SFX by ear (docs/OWNER.md needs 'audio: yes')"
 gate_end

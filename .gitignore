@@ -10,6 +10,7 @@
 !scripts/
 !scripts/gates/
 !scripts/lib/
+!screenshots/
 !.gitignore
 !CHANGELOG.md
 !CHANGES.md
@@ -58,3 +59,10 @@
 !scripts/screenshot
 !scripts/snapshot
 !scripts/tap
+!scripts/gates/soak
+!screenshots/battle.png
+!screenshots/offline.png
+!screenshots/shop.png
+!screenshots/title.png
+!screenshots/victory.png
+!screenshots/world-map.png

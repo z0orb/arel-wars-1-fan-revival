@@ -7,12 +7,8 @@ bash scripts/gates/gate-4 && pass "gate-4" || fail "gate-4"
 bash scripts/gates/gate-5 release && pass "gate-5 on release" || fail "gate-5 on release"
 if [ "${SOAK_ON_THROWAWAY_SAVE:-}" = 1 ]; then
   bash scripts/gates/gate-6 release && pass "gate-6 on release" || fail "gate-6 on release"
-  launch
-  adbs logcat -c
-  adbs shell monkey -p "$PKG" --pct-syskeys 0 --throttle 200 -v "$(param soak_events)" >"$EV/monkey.txt" 2>&1 && pass "monkey finished" || fail "monkey finished"
-  adbs logcat -d >"$EV/logcat-soak.txt"
-  grep -q FATAL "$EV/logcat-soak.txt" && fail "soak has no FATAL" || pass "soak has no FATAL"
-  adbs shell am force-stop "$PKG"
+  # Test-save swap, status bar lock, detached monkey, streamed logcat and dropbox checks: see soak.
+  bash scripts/gates/soak && pass "soak on release, no FATAL" || fail "soak on release"
 else
   fail "gate-6 and soak not run: needs SOAK_ON_THROWAWAY_SAVE=1 on a throwaway save"
 fi
