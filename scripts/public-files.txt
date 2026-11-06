@@ -13,6 +13,7 @@ patches/manifest/0003-landscape.json
 patches/src/com/gamevil/nexus2/ArelOffline.java
 patches/src/com/gamevil/nexus2/ArelSaveMirror.java
 screenshots/battle.png
+screenshots/main-menu.png
 screenshots/offline.png
 screenshots/shop.png
 screenshots/title.png

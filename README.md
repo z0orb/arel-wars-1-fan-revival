@@ -8,7 +8,16 @@
   <img alt="No internet permission" src="https://img.shields.io/badge/network-none-555?style=for-the-badge">
 </p>
 
-<p align="center"><img src="screenshots/title.png" width="720" alt="Title screen"></p>
+<table>
+  <tr>
+    <td width="50%"><img src="screenshots/title.png" alt="Title screen: Touch the Screen"></td>
+    <td width="50%"><img src="screenshots/main-menu.png" alt="Main menu with the three heroes: New Game, Continue, Options, Ranking, Help"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>Title screen</sub></td>
+    <td align="center"><sub>Main menu, with the three heroes</sub></td>
+  </tr>
+</table>
 
 Arel Wars (Android v1.0.2) stopped working years ago. Its servers are gone, it stops at a network check on every start, and Android 15 refuses to install it at all. This project patches the original APK so it installs and runs on current Android, with every online feature cleanly switched off and saves that survive updates.
 
