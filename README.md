@@ -75,14 +75,14 @@ In Brazil, Indonesia, Singapore and Thailand, Android blocks apps from unverifie
 
 Version 2 has its own package (`io.github.z0orb.arelwars`). It installs next to v1 and does not touch the v1 save. To update v2, install the new APK over the old one. **Never uninstall first.**
 
-The v1 APK (`arelwars-release.apk`, release v1.0.0) is still available. It needs a phone that runs 32-bit ARM apps.
+The v1 APK (`arelwars-release.apk`) is still available in [release v1.0.0](https://github.com/z0orb/arel-wars-1-fan-revival/releases/tag/v1.0.0). It needs a phone that runs 32-bit ARM apps.
 
 ## Keeping your save
 
 > [!WARNING]
 > **Uninstalling the game, or "Clear data" in Android settings, deletes your save.** Always update by installing over the top.
 
-- **From v1 to v2:** copy the v1 save folder to a normal folder, then open "Arel Wars Save Import" and pick that folder. The import checks each file first. Keep v1 until your save works in v2. [docs/INSTALL-v2.md](docs/INSTALL-v2.md#move-your-save-from-v1) has the steps.
+- **From v1 to v2:** copy the v1 save folder to a normal folder, then open "Arel Wars Save Import" and pick that folder. The import checks each file first. On Xiaomi phones, close the "Passed security tests" page of the installer before you start the import. Keep v1 until your save works in v2. [docs/INSTALL-v2.md](docs/INSTALL-v2.md#move-your-save-from-v1) has the steps.
 - The game copies its save about a second after every save, and whenever you leave the game. v2 copies it to:
   ```
   /sdcard/Android/data/io.github.z0orb.arelwars/files/saves/
@@ -127,7 +127,7 @@ Speed on the Redmi Note 12, in the largest battle of the test: 21.2 frames each 
 | v2 E5 | Target SDK 35, lock, back, offline and soak tests on the phone |
 | v2 E6 | Compatibility matrix (table above) |
 | v2 E7 | Speed bench: full speed in the largest battle |
-| v2 E8 | Release v2.0.0 |
+| v2 E8 | Release v2.0.0 (2026-11-18). A real v1 save moved to v2 byte for byte |
 
 ## Not included
 
