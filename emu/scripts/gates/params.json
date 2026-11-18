@@ -2,7 +2,7 @@
   "guest_sha256": "4007d1974bc8f3f7f0916c099f0d16d72181fb29c55068a2ecfe11e166464e16",
   "guest_source": "lib/armeabi/libgameDSO.so in ../dist/arelwars-release.apk (DES-03)",
   "p_session_frames": 1500,
-  "p_session_ref_8_2": "../universal/logs/gate-8.2-20261108-112436/frames-a.tsv",
+  "p_session_ref_8_2": "rewrite-keep/ref/p-session-8.2-frames-a.tsv",
   "p_heavy_frames": 3800,
   "p_heavy_battle_from": 720,
   "p_heavy_save": "docs/saves/mirror-20261109",

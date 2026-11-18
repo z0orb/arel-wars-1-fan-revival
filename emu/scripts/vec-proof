@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Vector proof of the native replacements (PLAN.md DES-12, TASK-E4.4).
 #   emu/scripts/vec-proof gen                 write the suites into work/vec/ with the 8.4 jars
-#                                             (universal/work/build/*.jar, read only; output only under emu/)
+#                                             (rewrite-keep/vecgen/*.jar, read only; output only under emu/)
 #   emu/scripts/vec-proof run SIDE SUITE...   SIDE: ref (reference oracle, output to work/ref/vec/SUITE.txt),
 #                                             off (runner, -native none) or on (runner, all replacements).
 #                                             Output to work/vec/out/SIDE-SUITE.txt
@@ -15,9 +15,9 @@ SUITES_PROOF="$SUITES_ALL hiparam"
 cmd=${1:-}; shift || true
 case "$cmd" in
 gen)
-  CP="../universal/work/build/engine.jar;../universal/work/build/desktop.jar"
+  CP="rewrite-keep/vecgen/engine.jar;rewrite-keep/vecgen/desktop.jar"
   mkdir -p work/vec
-  for s in ${*:-$SUITES_ALL}; do java -cp "$CP" arel.desktop.Vec gen "$s" ../universal/work/assets/assets "work/vec/$s.vec" | tail -1; done
+  for s in ${*:-$SUITES_ALL}; do java -cp "$CP" arel.desktop.Vec gen "$s" rewrite-keep/assets/assets "work/vec/$s.vec" | tail -1; done
   # Derived suite "hiparam": the leaves1 cases with a u16 parameter above 0xffff (tools/vec-hiparam.mjs)
   node tools/vec-hiparam.mjs work/vec/leaves1.vec work/vec/hiparam.vec
   ;;

@@ -1,17 +1,21 @@
 # The only emu/ file that may name the v1 package (CC-3). Read-only checks; it never writes to v1.
 # Source after env.sh.
 V1_PKG=com.gamevil.eruelwars.global
-V1_APK_SHA=2c79104b144f3c4b003fddcc9de6c2e986320ae78fd1abe8a58419a00998640d
+# The owner had v1 uninstalled from the phone on 2026-11-18, after the v2 release and the save migration.
+# V1_APK_SHA_LAST is the hash of the last installed v1 APK. From then on, the checks require that v1 stays
+# uninstalled: "not-installed". If a tool installs v1 again, each CC-1 install check fails.
+V1_APK_SHA_LAST=2c79104b144f3c4b003fddcc9de6c2e986320ae78fd1abe8a58419a00998640d
+V1_APK_SHA=not-installed
 V1_MIRROR=/sdcard/Android/data/$V1_PKG/files/saves
 
 # Sorted "sha256  path" list of every file under v1's scripts/, patches/, dist/ and keys/.
 v1_tree() { (cd .. && find scripts patches dist keys -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum); }
 
-# Hash of the installed v1 APK, or a reason it can't be read. Pulls into emu/work only.
+# Hash of the installed v1 APK, "not-installed" (exit 0), or a reason it can't be read. Pulls into emu/work only.
 v1_installed_sha() {
   local path tmp=work/v1-installed.apk
   path=$(adbs shell pm path "$V1_PKG" | tr -d '\r' | sed -n 's/^package://p' | head -1)
-  [ -n "$path" ] || { echo "not-installed"; return 1; }
+  [ -n "$path" ] || { echo "not-installed"; return 0; }
   mkdir -p work
   adbs pull "$path" "$tmp" >/dev/null 2>&1 || { echo "pull-failed"; return 1; }
   sha "$tmp"; rm -f "$tmp"

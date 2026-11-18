@@ -1,8 +1,8 @@
 // Writes bridge/src/native/leaves.inc: one row per verified DrawOP leaf (PLAN.md DES-12, TASK-E4.3).
-// Usage: node tools/gen-native-leaves.mjs ../universal/work/audit/mangled.txt ../universal/spec/verified.tsv bridge/src/native/leaves.inc
+// Usage: node tools/gen-native-leaves.mjs rewrite-keep/audit/mangled.txt rewrite-keep/spec/verified.tsv bridge/src/native/leaves.inc
 // A row: {"mangled name", op, fmt, clip, ints, u16param}. fmt: 0 to 5 as Blit.java, 6 Auto, 7 the
 // uncompressed _16 leaf (DrawOP_X_16PtS_...). ints: the count of int arguments after the pointers.
-// The regexes are those of universal/desktop/src/arel/desktop/VecRun.java.
+// The regexes are those of rewrite-keep/java-src/desktop/src/arel/desktop/VecRun.java.
 import fs from 'node:fs';
 const [mangledPath, verifiedPath, out] = process.argv.slice(2);
 const OPS = {COPY: 0, BLEND16: 1, ADD: 2, SUB: 3, VOID: 4, LIGHTEN: 6, GRAY: 10, RGB: 11, RGBHALF: 12, RGBADD: 13,

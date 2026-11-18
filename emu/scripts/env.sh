@@ -50,5 +50,6 @@ adbr() {
   printf '%s\n' "$out"; return 1
 }
 
-# Sorted "sha256  path" list of every file under universal/ (CC-2).
-universal_tree() { (cd .. && find universal -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum); }
+# universal/ (the clean-room rewrite) was deleted on 2026-11-18: the owner abandoned the rewrite. The parts that
+# emu/ still uses are in rewrite-keep/ (see rewrite-keep/README.md). CC-2 checks that universal/ stays absent.
+universal_absent() { [ ! -e ../universal ]; }

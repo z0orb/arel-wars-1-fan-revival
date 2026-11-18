@@ -20,7 +20,7 @@ gate_end() {
   echo "GATE-$GATE FAIL ($GATE_FAILS failed)"; sleep 1; exit 1
 }
 
-# CC-1: v1 untouched. CC-2: universal/ untouched. CC-3: no emu script names the v1 package.
+# CC-1: v1 untouched. CC-2: universal/ absent (deleted 2026-11-18). CC-3: no emu script names the v1 package.
 # CC-4: git tracks only the public set. CC-6: gate hashes match, and HANDOFF.md holds the SHA256SUMS hash.
 common_checks() {
   v1_tree >"$EV/v1-tree.txt"
@@ -31,8 +31,7 @@ common_checks() {
   else
     echo "SKIP  CC-1 installed v1 APK hash (phone $SERIAL not connected)"
   fi
-  universal_tree >"$EV/universal-tree.txt"
-  check "CC-2 universal/ equals docs/UNIVERSAL-BASELINE.txt" diff <(grep -v '^#' docs/UNIVERSAL-BASELINE.txt) "$EV/universal-tree.txt"
+  check "CC-2 universal/ is absent (deleted 2026-11-18, the rewrite is abandoned)" universal_absent
   # Built from parts so this file does not match.
   local p="com.gamevil.eruel""wars.global"
   grep -rlF "$p" scripts tools bridge runner shell probe ref-oracle 2>/dev/null | grep -vx 'scripts/v1check.sh' >"$EV/pkg-name-hits.txt"
