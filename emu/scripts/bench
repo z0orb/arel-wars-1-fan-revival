@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# Performance bench (PLAN.md TASK-E7.1, DES-16, REQ-13). Only the dev package io.github.z0orb.arelwars.emudev.
+# Usage: emu/scripts/bench [VARIANT] [-- INSTALL FLAGS]     (VARIANT: release (default) or debug)
+#   Example: emu/scripts/bench release -- --abi armeabi-v7a
+# Steps:
+#   1. Back up the saves of the dev package (debug, run-as). Put the perf save copy (params p_heavy_save,
+#      the owner's slot 2 at Stage 14) in place. Install VARIANT with the install flags (-r keeps the saves).
+#   2. e7_runs times: start the app, run the macro heavy_prelude (to the Stage 14 battle), clear logcat,
+#      run the macro heavy_battle (the hero and the summon cards of p-heavy), then collect the ArelEmuPerf
+#      lines (ArelPerf) and the SurfaceFlinger latency dump of the game layer.
+#   3. tools/bench-sum.mjs writes the medians to logs/bench-<ts>/summary.txt.
+#   4. Put the saves back, and install debug with no flags.
+# The run takes about 3 minutes for each run. It uses the screen of the device: nobody must use it then.
+# On an AVD: AREL_SERIAL=emulator-5554 (scripts/env.sh).
+source "$(dirname "$0")/env.sh"
+source scripts/gates/lib.sh
+source scripts/gates/devlib.sh
+VARIANT=${1:-release}; shift || true
+[ "${1:-}" = -- ] && shift
+FLAGS=("$@")
+EV=logs/bench-$(date +%Y%m%d-%H%M%S)
+mkdir -p "$EV"
+exec > >(tee -a "$EV/output.txt") 2>&1
+echo "bench evidence: emu/$EV"
+RUNS=$(P e7_runs)
+phone_up || { echo "device $SERIAL not connected"; exit 1; }
+{
+  echo "variant $VARIANT flags ${FLAGS[*]:-none} runs $RUNS"
+  echo "debug $(sha "$(apk_of debug)")"; echo "release $(sha "$(apk_of release)")"
+  echo "serial $SERIAL"
+  echo "model $(adbs shell getprop ro.product.model </dev/null | tr -d '\r')"
+  echo "sdk $(adbs shell getprop ro.build.version.sdk </dev/null | tr -d '\r')"
+  echo "abilist $(adbs shell getprop ro.product.cpu.abilist </dev/null | tr -d '\r')"
+} >"$EV/device.txt"
+cat "$EV/device.txt"
+
+# 1. Saves and install.
+ensure_v debug || { echo "debug install failed"; exit 1; }
+SAVED=$EV/phone-saves; mkdir -p "$SAVED"; play saves-get "$SAVED" >/dev/null 2>&1 || true
+[ -s "$SAVED/option.sav" ] || { SAVED=""; echo "no saves of the dev package to back up"; }
+restore() {
+  bash scripts/app stop || true
+  install_v debug || true
+  if [ -n "$SAVED" ]; then play saves-put "$SAVED" || echo "WARNING: saves not put back, copy in emu/$SAVED"
+  else play saves-clear || true; fi
+}
+trap restore EXIT
+play saves-put "$(P p_heavy_save)" || { echo "perf save not put in place"; exit 1; }
+install_v "$VARIANT" "${FLAGS[@]}" || { echo "$VARIANT install failed"; exit 1; }
+echo "installed $VARIANT, abi $(abi)" | tee -a "$EV/device.txt"
+echo "refresh $(adbs shell dumpsys display </dev/null | tr -d '\r' | grep -o 'renderFrameRate [0-9.]*' | head -1)" >>"$EV/device.txt"
+
+# 2. Runs.
+for r in $(seq 1 "$RUNS"); do
+  echo "run $r: start"
+  launch
+  play steps heavy_prelude || { echo "run $r: prelude failed"; continue; }
+  adbs logcat -c </dev/null || true
+  # Stream the lines during the battle. A dump at the end lost the first windows when other apps filled
+  # the ring buffer (bench-20261118-044155, runs 1 and 2).
+  adbs logcat -v threadtime -s ArelEmuPerf:I </dev/null >"$EV/run-$r-perf.raw" 2>/dev/null &
+  LOGPID=$!
+  t0=$(date +%s)
+  play steps heavy_battle || echo "run $r: battle macro stopped"
+  t1=$(date +%s)
+  echo "run $r: battle part $((t1 - t0)) s"
+  sleep 1; kill $LOGPID 2>/dev/null; wait $LOGPID 2>/dev/null
+  tr -d '\r' <"$EV/run-$r-perf.raw" >"$EV/run-$r-perf.txt"; rm -f "$EV/run-$r-perf.raw"
+  # The buffer layer of the game SurfaceView. Android 15: "SurfaceView[PKG/ACTIVITY](BLAST)#ID" inside a
+  # "RequestedLayerState{...}" line. Older versions: the name alone on the line, with or without (BLAST).
+  # The newest layer (the highest ID) is the one of this start.
+  layers=$(adbs shell dumpsys SurfaceFlinger --list </dev/null | tr -d '\r' | grep -F "$DEV_PKG" | grep -o 'SurfaceView\[[^]]*\][^ }]*' | grep -v '^Background' || true)
+  layer=$(grep -F '(BLAST)' <<<"$layers" | sort -t'#' -k2 -n | tail -1 || true)
+  [ -n "$layer" ] || layer=$(sort -t'#' -k2 -n <<<"$layers" | tail -1)
+  echo "$layer" >"$EV/run-$r-layer.txt"
+  [ -n "$layer" ] && adbs shell dumpsys SurfaceFlinger --latency "'$layer'" </dev/null | tr -d '\r' >"$EV/run-$r-sf.txt"
+  bash scripts/app shot "$EV/run-$r-end.png" || true
+  bash scripts/app logcat "$EV/run-$r-logcat.txt" || true
+done
+bash scripts/app stop || true
+
+# 3. Summary.
+node tools/bench-sum.mjs "$EV" "$RUNS"
+echo "bench done: emu/$EV/summary.txt"

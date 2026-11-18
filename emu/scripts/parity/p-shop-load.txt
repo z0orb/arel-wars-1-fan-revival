@@ -1,0 +1,7 @@
+# p-shop-load (TASK-E3.2): load the save that p-shop wrote. Title, Continue, slot 2, SHOP, ITEMS:
+# MY ITEM shows the Healing Grace (S) that p-shop bought, and the HUD shows 663 Gold. Run with -frames 700.
+150 tap 245 160
+237 tap 138 177
+282 tap 240 113
+450 tap 430 55
+520 tap 290 140

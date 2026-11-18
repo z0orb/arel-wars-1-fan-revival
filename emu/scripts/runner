@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Runner (PLAN.md TASK-E0.5, DES-13) on the phone: arel-emu, the guest through dynarmic in a 64-bit process.
+#   emu/scripts/runner setup                    build (build-bridge arm64-v8a), push the runner, guest and assets
+#   emu/scripts/runner run NAME [SAVE] -- ARGS  run a session; SAVE is a folder of save files (or "none").
+#                                               A -script path is pushed first. Results: work/runner/runs/NAME
+# Phone layout: /data/local/tmp/arel-emu/run/{arel-emu,libgameDSO.so,runs/NAME/{files,out}} and /data/local/tmp/arel-emu/assets/
+source "$(dirname "$0")/env.sh"
+R=$PHONE_DIR/run
+cmd=${1:-}; shift || true
+case "$cmd" in
+setup)
+  ABI=${RUNNER_ABI:-arm64-v8a}  # E6: x86_64 for an x86_64 AVD (GC-E6.7)
+  bash scripts/build-bridge $ABI >/dev/null
+  SO=$(bash scripts/guest)
+  adbs shell "mkdir -p $R/runs" </dev/null
+  adbs push work/bridge/$ABI/arel-emu $R/arel-emu >/dev/null
+  adbs push "$SO" $R/libgameDSO.so >/dev/null
+  adbs shell chmod 755 $R/arel-emu </dev/null
+  if [ "$(adbs shell "ls $PHONE_DIR/assets/data_eng 2>/dev/null | wc -l" </dev/null | tr -d '\r ')" -lt 2 ]; then
+    adbs push work/apk/assets $PHONE_DIR/ >/dev/null
+  fi
+  echo "runner setup done: $(adbs shell "sha256sum $R/arel-emu $R/libgameDSO.so" </dev/null | tr -d '\r' | tr '\n' ' ')"
+  ;;
+run)
+  name=$1; shift
+  save=none
+  if [ "${1:-}" != -- ]; then save=$1; shift; fi
+  [ "${1:-}" = -- ] && shift
+  args=()
+  while [ $# -gt 0 ]; do
+    if [ "$1" = -script ]; then adbs push "$2" $R/runs/$name.script >/dev/null; args+=(-script $R/runs/$name.script); shift 2
+    elif [ "$1" = -vec ]; then adbs push "$2" $R/runs/$name.vec >/dev/null; args+=(-vec $R/runs/$name.vec); shift 2
+    elif [ "$1" = -prof ]; then adbs push "$2" $R/runs/$name.prof >/dev/null; args+=(-prof $R/runs/$name.prof); shift 2
+    else args+=("$1"); shift; fi
+  done
+  adbs shell "rm -rf $R/runs/$name && mkdir -p $R/runs/$name/files $R/runs/$name/out" </dev/null
+  if [ "$save" != none ]; then
+    for f in "$save"/*; do adbs push "$f" $R/runs/$name/files/ >/dev/null; done
+  fi
+  mkdir -p work/runner/runs
+  start=$(date +%s)
+  adbs shell "cd $R && ./${RUNNER_BIN:-arel-emu} -so $R/libgameDSO.so -assets $PHONE_DIR/assets -files $R/runs/$name/files -out $R/runs/$name/out ${args[*]}; echo exit=\$?" </dev/null 2>&1 | tr -d '\r' >work/runner/last-stdout.txt
+  rc=$(sed -n 's/^exit=//p' work/runner/last-stdout.txt | tail -1)
+  rm -rf work/runner/runs/$name
+  adbs pull $R/runs/$name/out work/runner/runs/$name >/dev/null
+  adbs pull $R/runs/$name/files work/runner/runs/$name/files >/dev/null 2>&1 || true
+  cat work/runner/last-stdout.txt
+  echo "runner run $name: exit=$rc, $(( $(date +%s) - start )) s, results in emu/work/runner/runs/$name"
+  [ "$rc" = 0 ]
+  ;;
+*) echo "usage: emu/scripts/runner setup | run NAME [SAVE] -- ARGS"; exit 2 ;;
+esac

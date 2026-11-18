@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+# Phase E5 exit gate (PLAN.md 10, Phase E5): shell at target 35, device gates and the native path.
+# Usage: emu/scripts/gates/gate-E5
+# The gate does not build or install. Before it: emu/scripts/build debug, emu/scripts/build release, and
+# emu/scripts/app install debug (the owner accepts the install on the phone). Nobody touches the phone
+# during the device part.
+source "$(dirname "$0")/../env.sh"
+source scripts/gates/lib.sh
+gate_start E5
+P() { node -p "require('./scripts/gates/params.json').$1"; }
+AAPT2=aapt2
+TS=docs/saves/testsave
+play() { bash scripts/play "$@"; }
+
+# ---- GC-E5.10: CC-1 to CC-8 (CC-5 in the device part).
+common_checks
+artefact_check
+
+# ---- GC-E5.1 and GC-E5.2 (TASK-E5.1): the manifest of both variants.
+for v in debug release; do
+  apk=dist/arelemu-$v.apk
+  if [ ! -f "$apk" ]; then fail "GC-E5.1 $apk exists"; continue; fi
+  $AAPT2 dump badging "$apk" 2>&1 | tr -d '\r' >"$EV/badging-$v.txt"
+  check "GC-E5.1 $v: minSdk 21" grep -qx "minSdkVersion:'21'" "$EV/badging-$v.txt"
+  check "GC-E5.1 $v: targetSdk 35" grep -qx "targetSdkVersion:'35'" "$EV/badging-$v.txt"
+  check "GC-E5.1 $v: native code arm64-v8a, armeabi-v7a, x86_64" grep -qx "native-code: 'arm64-v8a' 'armeabi-v7a' 'x86_64'" "$EV/badging-$v.txt"
+  sed -n "s/^uses-permission: name='\([^']*\)'.*/\1/p" "$EV/badging-$v.txt" | sort >"$EV/permissions-$v.txt"
+  check "GC-E5.2 $v: the permissions are exactly VIBRATE" test "$(cat "$EV/permissions-$v.txt")" = android.permission.VIBRATE
+  $AAPT2 dump xmltree --file AndroidManifest.xml "$apk" 2>&1 | tr -d '\r' >"$EV/manifest-$v.txt"
+  check "GC-E5.2 $v: INTERNET is absent from the whole manifest" bash -c "grep -q ' E: manifest' '$EV/manifest-$v.txt' && ! grep -q 'android.permission.INTERNET' '$EV/manifest-$v.txt'"
+  # TASK-E5.1: each activity states android:exported (required from target 31 for an intent filter).
+  n_act=$(grep -c ' E: activity ' "$EV/manifest-$v.txt" || true)
+  n_exp=$(grep -c ':exported(0x01010010)=' "$EV/manifest-$v.txt" || true)
+  check "TASK-E5.1 $v: each of the $n_act activities states android:exported ($n_exp)" test "$n_act" -gt 0 -a "$n_act" = "$n_exp"
+  check "TASK-E5.1 $v: enableOnBackInvokedCallback is true" grep -q 'enableOnBackInvokedCallback(0x0101066c)=true' "$EV/manifest-$v.txt"
+  n_cfg=$(grep -c 'configChanges(0x0101001f)=0x00001da0' "$EV/manifest-$v.txt" || true)
+  check "TASK-E5.1 $v: each activity has configChanges 0x1da0 ($n_cfg of $n_act)" test "$n_act" = "$n_cfg"
+done
+check "TASK-E5.1 docs/TARGET35.md records the target-gated rules" test -s docs/TARGET35.md
+
+# ---- Device part on the installed debug APK.
+phone_up || { fail "phone $SERIAL connected"; gate_end; }
+got=$(bash scripts/app installed-sha)
+check "CC-5 the installed dev APK equals dist/arelemu-debug.apk" test "$got" = "$(sha dist/arelemu-debug.apk)"
+adbs shell dumpsys package $DEV_PKG </dev/null | tr -d '\r' >"$EV/dumpsys-package.txt"
+check "GC-E5.6 normal install: primaryCpuAbi is arm64-v8a" grep -q 'primaryCpuAbi=arm64-v8a' "$EV/dumpsys-package.txt"
+adbs shell input keyevent WAKEUP </dev/null; adbs shell wm dismiss-keyguard </dev/null
+play saves-clear; play saves-put $TS
+bash scripts/app stop; bash scripts/app launch; sleep "$(P e1_launch_wait_sec)"
+check "CC-5 mCurrentFocus is our activity" play focused
+
+# GC-E5.3 (TASK-E5.2): no game pixel under a system bar or the cutout. ArelInsets logs the box it set.
+box_line() { adbs logcat -d -s ArelInsets:I </dev/null | tr -d '\r' | grep ' box ' | tail -1 | sed 's/.* box /box /'; }
+inside() { # shot name: every lit pixel is inside the box of ArelInsets, and the box is in the safe area
+  local s=$EV/$1.png; bash scripts/app shot "$s"
+  local lb; lb=$(node tools/screen.mjs lit-box "$s"); echo "$1 lit-box $lb" >>"$EV/boxes.txt"
+  local bl; bl=$(box_line); echo "$1 $bl" >>"$EV/boxes.txt"
+  node -e '
+    const [W,H,x0,y0,x1,y1] = process.argv[1].split(" ").map(Number);
+    const t = process.argv[2].split(" ");
+    if (t[0] !== "box") process.exit(1);
+    const [bx,by,bw,bh] = t.slice(1,5).map(Number), [ww,wh] = t.slice(6,8).map(Number), [sl,st,sr,sb] = t.slice(9,13).map(Number);
+    // The window must fill the screen, so window pixels are screen pixels. 3:2 within rounding.
+    const ok = ww === W && wh === H && Math.abs(bw * 2 - bh * 3) <= 3;
+    const inSafe = bx >= sl && by >= st && bx + bw <= W - sr && by + bh <= H - sb;
+    const litIn = x0 >= bx && y0 >= by && x1 <= bx + bw && y1 <= by + bh;
+    process.exit(ok && inSafe && litIn ? 0 : 1);' "$lb" "$bl"
+}
+check "GC-E5.3 title: all game pixels inside the 3:2 box, the box inside the safe area" inside title
+check "GC-E5.3 to_worldmap ran (taps mapped to the ArelInsets box)" play steps to_worldmap
+check "GC-E5.3 world map: all game pixels inside the box" inside worldmap
+check "GC-E5.3 to_battle ran" play steps to_battle
+sleep 2
+check "GC-E5.3 battle: all game pixels inside the box" inside battle
+play dbglog "$EV/dbg-insets.txt"
+check "GC-E5.3 the mapped taps reached the world map (probe state 5)" grep -qP '\tprobe state 5 ' "$EV/dbg-insets.txt"
+# GC-E5.3: the corner tap map is in device-life (see below).
+
+# GC-E5.4 (TASK-E5.2): back on the main menu. The runner (same guest code as v1) shows the "Close"
+# popup after one game key -8, and no change after a second one (run e5back2, session 2026-11-11).
+# v1 sends one key -8 for each back (gate-E2 evidence). This phone has 3-button navigation, so the
+# gate sends the back button (KEYCODE_BACK). The system sends a back gesture to the same callback.
+bash scripts/app stop; bash scripts/app launch; sleep "$(P e1_launch_wait_sec)"
+play steps title_tap; sleep 6
+pid0=$(bash scripts/app pid)
+play dbglog "$EV/dbg-back0.txt"; k0=$(grep -c 'handleCletEvent 2 -8 0 0' "$EV/dbg-back0.txt" || true)
+bash scripts/app shot "$EV/back0.png"
+adbs shell input keyevent BACK </dev/null; sleep 3; bash scripts/app shot "$EV/back1.png"
+adbs shell input keyevent BACK </dev/null; sleep 3; bash scripts/app shot "$EV/back2.png"
+play dbglog "$EV/dbg-back2.txt"; k2=$(grep -c 'handleCletEvent 2 -8 0 0' "$EV/dbg-back2.txt" || true)
+c1=$(node tools/screen.mjs pixels-changed "$EV/back0.png" "$EV/back1.png")
+c2=$(node tools/screen.mjs pixels-changed "$EV/back1.png" "$EV/back2.png")
+check "GC-E5.4 two back buttons give two game keys -8 ($k0 to $k2)" test "$((k2 - k0))" = 2
+check "GC-E5.4 the first back opens the exit popup (changed $c1, min $(P e5_back_popup_min_change))" node -e "process.exit($c1 >= $(P e5_back_popup_min_change) ? 0 : 1)"
+check "GC-E5.4 the second back leaves the popup as it is, as in v1 (changed $c2, max $(P e5_back_second_max_change))" node -e "process.exit($c2 <= $(P e5_back_second_max_change) ? 0 : 1)"
+check "GC-E5.4 the same process, focused" bash -c "[ -n '$pid0' ] && [ \"\$(bash scripts/app pid)\" = '$pid0' ] && bash scripts/play focused"
+bash scripts/app logcat "$EV/logcat.txt"
+grep -E "$(P e1_logcat_bad_regex)" "$EV/logcat.txt" >"$EV/logcat-hits.txt"
+check "CC-5 app logcat has no FATAL, ANR, JNI DETECTED, dlopen failed or bridge crash report" test ! -s "$EV/logcat-hits.txt"
+# GC-E5.4: no back gesture test (owner, 2026-11-11). The back button test above stays.
+bash scripts/app stop
+play saves-clear
+
+# ---- GC-E5.2, GC-E5.3, GC-E5.5 to GC-E5.7, GC-E5.9 (TASK-E5.3 to TASK-E5.5): the device gates.
+# They take about 2 hours, so this gate does not run them. It reads their newest evidence. The evidence
+# counts only if its apks.txt holds the hashes of both builds in dist/ now, and its output ends in PASS.
+evidence() { # NAME ARGS: the newest passing evidence folder of gate NAME with these arguments, for these builds
+  local d want="args $2"
+  for d in $(ls -1d logs/gate-$1-2* 2>/dev/null | sort -r); do
+    [ -f "$d/apks.txt" ] || continue
+    [ "$(sed -n 1p "$d/apks.txt")" = "$want" ] || continue
+    grep -qx "debug $(sha dist/arelemu-debug.apk)" "$d/apks.txt" || continue
+    grep -qx "release $(sha dist/arelemu-release.apk)" "$d/apks.txt" || continue
+    tail -3 "$d/output.txt" | grep -qx "GATE-$1 PASS" || continue
+    echo "$d"; return 0
+  done
+  return 1
+}
+ev() { local d; d=$(evidence "$1" "$2") && echo "$1 ($2): $d" >>"$EV/device-evidence.txt"; }
+check "GC-E5.3 the corner tap map: device-life passes on debug and release" ev device-life ""
+check "GC-E5.2 device-net passes on debug and release: zero app traffic with Wi-Fi on" ev device-net ""
+check "GC-E5.5 device-life passes on debug and release (20 lock cycles, force-stop, install -r)" ev device-life ""
+check "GC-E5.5 device-offline passes on debug" ev device-offline-debug "debug"
+check "GC-E5.5 GC-E5.6 device-offline passes on release with adb install --abi arm64-v8a" ev device-offline-release-abi-arm64-v8a "release --abi arm64-v8a"
+check "GC-E5.7 device-offline passes on debug with adb install --abi armeabi-v7a" ev device-offline-debug-abi-armeabi-v7a "debug --abi armeabi-v7a"
+d=$(evidence device-offline-release-abi-arm64-v8a "release --abi arm64-v8a")
+check "GC-E5.6 adb install --abi arm64-v8a gives primaryCpuAbi arm64-v8a" grep -qx 'primaryCpuAbi=arm64-v8a' "$d/abi.txt"
+d=$(evidence device-offline-debug-abi-armeabi-v7a "debug --abi armeabi-v7a")
+check "GC-E5.7 adb install --abi armeabi-v7a gives primaryCpuAbi armeabi-v7a" grep -qx 'primaryCpuAbi=armeabi-v7a' "$d/abi.txt"
+d=$(evidence soak "")
+check "GC-E5.9 the $(P e5_soak_events)-event soak passes on release" grep -q "monkey finished all $(P e5_soak_events) events" "$d/output.txt"
+# ---- GC-E5.8 (TASK-E5.6).
+for k in 'Install prompt' 'Play Protect' 'Frame boost'; do
+  check "GC-E5.8 docs/DEVICES.md records the HyperOS behaviour: $k" grep -q "^## .*$k" docs/DEVICES.md
+done
+check "CC-1 installed v1 APK hash is unchanged at the end" test "$(v1_installed_sha)" = "$V1_APK_SHA"
+gate_end

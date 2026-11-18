@@ -1,0 +1,3 @@
+[
+  { "op": "set-attr", "tag": "application", "attr": "debuggable", "id": "0x0101000f", "type": "bool", "value": true }
+]

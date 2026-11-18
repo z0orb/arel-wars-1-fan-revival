@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# Migration of the owner's v1 save into the public APK (PLAN.md TASK-E8.5, GC-E8.2).
+# Usage: emu/scripts/e8-migrate [--no-install]
+# Steps:
+#   1. Read the v1 save mirror (read only, as v1 scripts/pull-saves does) and check each file (tools/save-check.mjs).
+#   2. Install dist/arelwars-public.apk with adb install -r (unless --no-install: the owner installed it by
+#      hand, for example from a file manager to test Play Protect).
+#   3. Push a copy of the set to /sdcard/Download/ArelWars-saves-e8/. Import it with "Arel Wars Save Import"
+#      and the system folder picker, as docs/INSTALL-v2.md tells a user.
+#   4. Start the game, wait at the title, go HOME. The save mirror of the public package must then equal
+#      the v1 set, byte for byte. The v1 mirror and the v1 APK must not change.
+# It never installs, uninstalls or changes v1. It deletes only its own folder in Download at the end.
+# Results: logs/e8-migrate-<ts>/result.txt (gate-E8 reads it).
+source "$(dirname "$0")/env.sh"
+set +e +o pipefail
+source scripts/v1check.sh
+PUB=dist/arelwars-public.apk
+PKG=io.github.z0orb.arelwars
+DL=/sdcard/Download/ArelWars-saves-e8
+URI="content://com.android.externalstorage.documents/document/primary%3ADownload%2FArelWars-saves-e8"
+EV=logs/e8-migrate-$(date +%Y%m%d-%H%M%S); mkdir -p "$EV"
+exec > >(tee -a "$EV/output.txt") 2>&1
+R=$EV/result.txt; : >"$R"
+rec() { echo "$1" | tee -a "$R"; }
+res() { if "${@:2}"; then rec "$1 PASS"; else rec "$1 FAIL"; fi; }
+names() { (cd "$1" && ls -1 | grep -E '^(Save[0-9]+\.dat|Sng[0-9]+\.dat|option\.sav)$'); }
+same_set() { local a b n; a=$(names "$1"); b=$(names "$2"); [ -n "$a" ] && [ "$a" = "$b" ] || return 1; for n in $a; do cmp -s "$1/$n" "$2/$n" || return 1; done; }
+wake() { for i in 1 2 3; do adbs shell input keyevent WAKEUP </dev/null; adbs shell wm dismiss-keyguard </dev/null; sleep 2
+  adbs shell dumpsys activity activities </dev/null | tr -d '\r' | grep -q 'mKeyguardShowing=true' || return 0; done; return 1; }
+ui_tap() { local xy i; wake; for i in 1 2 3 4 5 6; do
+  adbs shell uiautomator dump /sdcard/Download/arel-ui.xml >/dev/null 2>&1 </dev/null
+  adbs exec-out cat /sdcard/Download/arel-ui.xml >"$EV/ui.xml"
+  if xy=$(node tools/ui-find.mjs "$EV/ui.xml" "$1"); then echo "ui tap /$1/ at $xy"; adbs shell input tap $xy </dev/null; return 0; fi
+  sleep 1; done; echo "ui element /$1/ not found"; return 1; }
+
+rec "public $(sha $PUB)"
+[ "$(sha $PUB)" = "$(cat $PUB.sha256)" ] || { rec "public APK does not match its .sha256 FAIL"; exit 1; }
+v1sha=$(v1_installed_sha); echo "v1 installed $v1sha"
+res "v1 installed before" test "$v1sha" = "$V1_APK_SHA"
+v1_mirror_listing >"$EV/v1-mirror-before.txt"
+v1_mirror_pull "$EV/v1-saves"
+(cd "$EV/v1-saves" && sha256sum $(names .)) >"$EV/v1-saves.sha256"
+cat "$EV/v1-saves.sha256"
+mapfile -t files < <(names "$EV/v1-saves" | sed "s#^#$EV/v1-saves/#")
+node tools/save-check.mjs work/guest/libgameDSO.so "${files[@]}" >"$EV/save-check.txt" 2>&1; sc=$?
+cat "$EV/save-check.txt"
+if [ $sc = 0 ] && [ ${#files[@]} -ge 3 ]; then rec "save-check PASS"; else rec "save-check FAIL"; fi
+
+if [ "${1:-}" != --no-install ]; then
+  out=$(adbs install -r "$PUB" 2>&1 </dev/null); echo "$out" >"$EV/install.txt"; echo "$out"
+  grep -q Success <<<"$out" || { rec "install FAIL"; exit 1; }
+fi
+adbs shell pm list packages "$PKG" </dev/null | tr -d '\r' | grep -qx "package:$PKG" || { rec "public package installed FAIL"; exit 1; }
+rec "public package installed PASS"
+
+adbs shell "rm -rf $DL; mkdir -p $DL" </dev/null
+for f in "${files[@]}"; do adbs push "$f" "$DL/" >/dev/null; done
+wake; adbs shell am start -S --activity-clear-task -n "$PKG/com.gamevil.nexus2.ArelImport" --es initial "$URI" </dev/null; sleep 4
+adbs exec-out screencap -p >"$EV/picker.png"
+ui_tap "$(node -p "require('./scripts/gates/params.json').e3_picker_use_regex")"; sleep 2
+ui_tap "$(node -p "require('./scripts/gates/params.json').e3_picker_allow_regex")"; sleep 4
+adbs exec-out screencap -p >"$EV/import-result.png"
+adbs shell uiautomator dump /sdcard/Download/arel-ui.xml >/dev/null 2>&1 </dev/null
+adbs exec-out cat /sdcard/Download/arel-ui.xml >"$EV/import-result.xml"
+res "import dialog says Import complete: ${#files[@]} files" grep -q "Import complete: ${#files[@]} files" "$EV/import-result.xml"
+ui_tap '^ok$'; sleep 2
+
+# The game at the title, then HOME: the mirror of the public package gets the imported set.
+wake; adbs shell monkey -p "$PKG" -c android.intent.category.LAUNCHER 1 </dev/null >/dev/null 2>&1; sleep 20
+adbs exec-out screencap -p >"$EV/title.png"
+adbs shell input keyevent HOME </dev/null; sleep 5
+mkdir -p "$EV/public-mirror"; adbs pull "/sdcard/Android/data/$PKG/files/saves/." "$EV/public-mirror" </dev/null >/dev/null 2>&1
+ls -l "$EV/public-mirror"
+res "imported equals v1" same_set "$EV/public-mirror" "$EV/v1-saves"
+v1_mirror_listing >"$EV/v1-mirror-after.txt"
+res "v1 mirror unchanged" cmp -s "$EV/v1-mirror-before.txt" "$EV/v1-mirror-after.txt"
+res "v1 installed" test "$(v1_installed_sha)" = "$V1_APK_SHA"
+adbs shell "rm -rf $DL /sdcard/Download/arel-ui.xml" </dev/null
+echo "result: emu/$R"; cat "$R"

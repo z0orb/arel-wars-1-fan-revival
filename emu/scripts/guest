@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Gets the guest (DES-03) and the original assets into emu/work, read-only from v1 and original/.
+#   work/guest/libgameDSO.so  lib/armeabi/libgameDSO.so of ../dist/arelwars-release.apk, hash from params.json
+#   work/apk/                 the original APK unpacked (assets/ is what the runner and reference oracle read)
+# Usage: emu/scripts/guest   (prints the guest path; does nothing when both are present and correct)
+source "$(dirname "$0")/env.sh"
+want=$(node -p "require('./scripts/gates/params.json').guest_sha256")
+if [ ! -f work/guest/libgameDSO.so ] || [ "$(sha work/guest/libgameDSO.so)" != "$want" ]; then
+  mkdir -p work/guest
+  unzip -p "$V1_RELEASE_APK" lib/armeabi/libgameDSO.so >work/guest/libgameDSO.so
+  got=$(sha work/guest/libgameDSO.so)
+  [ "$got" = "$want" ] || { echo "guest hash $got is not $want" >&2; rm -f work/guest/libgameDSO.so; exit 1; }
+fi
+if [ ! -f work/apk/.done ]; then
+  [ "$(sha "$ORIGINAL")" = "$ORIGINAL_SHA" ] || { echo "original APK hash differs" >&2; exit 1; }
+  rm -rf work/apk; mkdir -p work/apk
+  unzip -q "$ORIGINAL" -d work/apk
+  touch work/apk/.done
+fi
+echo work/guest/libgameDSO.so

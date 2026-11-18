@@ -1,0 +1,200 @@
+#!/usr/bin/env bash
+# Phase E3 exit gate (PLAN.md 10, Phase E3): saves.
+# Usage: emu/scripts/gates/gate-E3
+# The gate does not build or install. The phone must have dist/arelemu-debug.apk installed
+# (emu/scripts/app install: the owner accepts it on the phone). Nobody touches the phone during the run.
+# Runner and reference oracle parts: the save copies docs/saves/testsave and docs/saves/mirror-20261109,
+# the parity scripts p-session, p-heavy, p-shop and p-shop-load, and the reference outputs in work/ref/.
+# Device parts: the dev package only (never v1). The gate deletes the saves and arel-* files of the dev
+# package at its start and end. It uses /sdcard/Download/arel-import-test/ for the file picker, and
+# deletes it at the end. About 10 minutes.
+source "$(dirname "$0")/../env.sh"
+source scripts/gates/lib.sh
+gate_start E3
+P() { node -p "require('./scripts/gates/params.json').$1"; }
+cols() { cut -f1-3 "$1"; }
+APK=dist/arelemu-debug.apk
+GUEST=$(bash scripts/guest)
+TS=docs/saves/testsave
+OWN=$(P p_heavy_save)
+SHOP_FRAMES=$(P e3_p_shop_frames)
+LOAD_FRAMES=$(P e3_p_shop_load_frames)
+play() { bash scripts/play "$@"; }
+runas() { adbs exec-out run-as $DEV_PKG "$@" </dev/null; }
+# Screen on and no keyguard. With nobody at the phone, the screen goes off between the parts
+# (gate-E3 run 20261109-141039: the lock screen took every picker tap). Max 3 tries.
+wake() {
+  for i in 1 2 3; do
+    adbs shell input keyevent WAKEUP </dev/null; adbs shell wm dismiss-keyguard </dev/null; sleep 2
+    adbs shell dumpsys activity activities </dev/null | tr -d '\r' | grep -q 'mKeyguardShowing=true' || return 0
+  done
+  echo "the keyguard still shows after 3 tries"; return 1
+}
+focus_log() { echo "focus at $1: $(adbs shell dumpsys window </dev/null | tr -d '\r' | grep mCurrentFocus | head -1)"; }
+launch() { wake; bash scripts/app stop; bash scripts/app launch; sleep "$(P e1_launch_wait_sec)"; focus_log launch; }
+# Tap a system UI element (file picker, permission dialog) by its text, from a uiautomator dump.
+ui_tap() { # REGEX
+  local xy
+  wake
+  for i in 1 2 3 4 5 6; do
+    adbs shell uiautomator dump /sdcard/Download/arel-ui.xml >/dev/null 2>&1 </dev/null
+    adbs exec-out cat /sdcard/Download/arel-ui.xml >"$EV/ui.xml"
+    if xy=$(node tools/ui-find.mjs "$EV/ui.xml" "$1"); then echo "ui tap /$1/ at $xy"; adbs shell input tap $xy </dev/null; return 0; fi
+    sleep 1
+  done
+  echo "ui element /$1/ not found"; return 1
+}
+# The files of the dev package: save files to DIR (play saves-get), a whole folder below files/ to DIR.
+get_dir() { # SUBDIR DIR
+  mkdir -p "$2"
+  for n in $(runas ls -1 "files/$1" 2>/dev/null | tr -d '\r'); do runas cat "files/$1/$n" >"$2/$n"; done
+}
+same_set() { # DIR_A DIR_B: the same save file names, byte-equal
+  local a b; a=$(cd "$1" && ls -1 | grep -E '^(Save[0-9]+\.dat|Sng[0-9]+\.dat|option\.sav)$'); b=$(cd "$2" && ls -1 | grep -E '^(Save[0-9]+\.dat|Sng[0-9]+\.dat|option\.sav)$')
+  [ -n "$a" ] && [ "$a" = "$b" ] || return 1
+  for n in $a; do cmp -s "$1/$n" "$2/$n" || return 1; done
+}
+clean_dev() {
+  play saves-clear
+  adbs exec-out "run-as $DEV_PKG sh -c 'rm -rf files/arel-backup files/arel-import-in files/arel-import-tmp files/arel-import-result.txt'" </dev/null
+}
+
+# GC-E3.6: CC-1 to CC-6 and CC-8.
+common_checks
+phone_up || { fail "phone $SERIAL connected"; gate_end; }
+bash scripts/runner setup >"$EV/runner-setup.txt" 2>&1
+check "runner builds and pushes" grep -q 'runner setup done' "$EV/runner-setup.txt"
+bash scripts/ref-oracle setup >"$EV/ref-setup.txt" 2>&1
+check "reference oracle builds and pushes" grep -q 'ref-oracle setup done' "$EV/ref-setup.txt"
+
+# ---- GC-E3.1 (TASK-E3.1): the test save copy (p-session, slot 1) and the owner's save copy (p-heavy, slot 2).
+bash scripts/runner run gE3s $TS -- -frames "$(P p_session_frames)" -script scripts/parity/p-session.txt -probe every:10 -quiet-sound >"$EV/session.txt" 2>&1
+check "CC-8 runner p-session hashes equal the reference oracle" cmp -s <(cols work/runner/runs/gE3s/frames.tsv) <(cols work/ref/p-session/frames.tsv)
+check "GC-E3.1 test save: runner p-session probes equal the reference oracle" cmp -s work/runner/runs/gE3s/probes.jsonl work/ref/p-session/probes.jsonl
+bash scripts/runner run gE3h $OWN -- -frames "$(P p_heavy_frames)" -script scripts/parity/p-heavy.txt -probe every:10 -quiet-sound >"$EV/heavy.txt" 2>&1
+check "GC-E3.1 owner's save: runner p-heavy hashes equal the reference oracle" cmp -s <(cols work/runner/runs/gE3h/frames.tsv) <(cols work/ref/p-heavy/frames.tsv)
+check "GC-E3.1 owner's save: runner p-heavy probes equal the reference oracle" cmp -s work/runner/runs/gE3h/probes.jsonl work/ref/p-heavy/probes.jsonl
+check "GC-E3.1 owner's save loads with Gold 673, Cash 2500, stage index 13" grep -q '"gold":673,"cash":2500,"stage":13' work/runner/runs/gE3h/probes.jsonl
+
+# ---- GC-E3.2 (TASK-E3.2): p-shop writes a save. Each side loads the save of the other.
+bash scripts/runner run gE3p $OWN -- -frames $SHOP_FRAMES -script scripts/parity/p-shop.txt -probe every:10 -quiet-sound >"$EV/shop-runner.txt" 2>&1
+bash scripts/ref-oracle run gE3p $OWN -- -frames $SHOP_FRAMES -script scripts/parity/p-shop.txt -probe every:10 -quiet-sound >"$EV/shop-ref.txt" 2>&1
+check "GC-E3.2 p-shop: runner hashes equal the reference oracle" cmp -s <(cols work/runner/runs/gE3p/frames.tsv) <(cols work/ref-oracle/runs/gE3p/frames.tsv)
+check "GC-E3.2 p-shop: runner probes equal the reference oracle" cmp -s work/runner/runs/gE3p/probes.jsonl work/ref-oracle/runs/gE3p/probes.jsonl
+check "GC-E3.2 p-shop: reference oracle equals the stored reference (work/ref/p-shop)" cmp -s work/ref-oracle/runs/gE3p/probes.jsonl work/ref/p-shop/probes.jsonl
+check "GC-E3.2 p-shop: the purchase takes 10 Gold (663 after)" grep -q '"gold":663,"cash":2500,"stage":13' work/runner/runs/gE3p/probes.jsonl
+check "GC-E3.2 p-shop: the runner wrote Save1.dat at the stage entry" grep -qP '\tfopen \S+/Save1.dat w\+ -> ok' work/runner/runs/gE3p/log.txt
+check "GC-E3.2 p-shop: the saves of the runner and the reference oracle are byte-equal" same_set work/runner/runs/gE3p/files work/ref-oracle/runs/gE3p/files
+node tools/save-check.mjs "$GUEST" work/runner/runs/gE3p/files/*.dat work/runner/runs/gE3p/files/option.sav >"$EV/shop-save-check.txt"
+check "GC-E3.2 p-shop: each written file passes the load checks of the game (save-check.mjs)" test $? = 0
+bash scripts/runner run gE3lr work/ref-oracle/runs/gE3p/files -- -frames $LOAD_FRAMES -script scripts/parity/p-shop-load.txt -probe every:10 -quiet-sound >"$EV/load-runner.txt" 2>&1
+bash scripts/ref-oracle run gE3lr work/runner/runs/gE3p/files -- -frames $LOAD_FRAMES -script scripts/parity/p-shop-load.txt -probe every:10 -quiet-sound >"$EV/load-ref.txt" 2>&1
+check "GC-E3.2 runner loads the reference save: probes equal the reference oracle loading the runner save" cmp -s work/runner/runs/gE3lr/probes.jsonl work/ref-oracle/runs/gE3lr/probes.jsonl
+check "GC-E3.2 the same, frame hashes (MY ITEM shows the bought item)" cmp -s <(cols work/runner/runs/gE3lr/frames.tsv) <(cols work/ref-oracle/runs/gE3lr/frames.tsv)
+check "GC-E3.2 the cross loads equal the stored reference (work/ref/p-shop-load)" cmp -s work/runner/runs/gE3lr/probes.jsonl work/ref/p-shop-load/probes.jsonl
+check "GC-E3.2 the loaded save has Gold 663" grep -q '"gold":663,"cash":2500,"stage":13' work/runner/runs/gE3lr/probes.jsonl
+
+# ---- TASK-E3.3, E3.5 in the runner: the backup of DES-14, and a damaged save.
+check "TASK-E3.3 runner p-shop: backups of Save1.dat, Sng1.dat and option.sav" bash -c "ls work/runner/runs/gE3p/files/arel-backup/ | grep -qx Save1.dat.1 && ls work/runner/runs/gE3p/files/arel-backup/ | grep -qx Sng1.dat.1 && ls work/runner/runs/gE3p/files/arel-backup/ | grep -qx option.sav.1"
+check "TASK-E3.3 runner p-shop: Save1.dat.1 equals the save before the stage entry" cmp -s work/runner/runs/gE3p/files/arel-backup/Save1.dat.1 $OWN/Save1.dat
+DMG=$EV/damaged; mkdir -p "$DMG"; cp $TS/* "$DMG/"
+off=$(P e3_damage_offset)
+node -e "const fs=require('fs'),f=process.argv[1],b=fs.readFileSync(f);b[+process.argv[2]]^=0xff;fs.writeFileSync(f,b)" "$DMG/Save0.dat" "$off"
+node tools/save-check.mjs "$GUEST" "$DMG/Save0.dat" >"$EV/damaged-check.txt"
+check "TASK-E3.5 the damaged copy fails the checksum (byte $off changed)" grep -q 'checksum error' "$EV/damaged-check.txt"
+bash scripts/runner run gE3d "$DMG" -- -frames 700 -script scripts/parity/p-session.txt -probe every:10 -quiet-sound >"$EV/damaged-runner.txt" 2>&1
+bash scripts/ref-oracle run gE3d "$DMG" -- -frames 700 -script scripts/parity/p-session.txt -probe every:10 -quiet-sound >"$EV/damaged-ref.txt" 2>&1
+check "TASK-E3.5 runner: the game deletes the damaged Save0.dat (unlink)" grep -qP '\tunlink \S+/Save0.dat -> 0' work/runner/runs/gE3d/log.txt
+check "TASK-E3.5 runner: then it crashes in CInventory::EncryptSave (fault address 0x14)" grep -q 'unmapped address 0x00000014 (pc 0x100bd722)' work/runner/runs/gE3d/log.txt
+check "TASK-E3.5 the reference oracle (original code, 32-bit) crashes in the same place" grep -q 'fault address 0x14' "$EV/damaged-ref.txt"
+check "TASK-E3.5 runner: files/arel-backup/Save0.dat.1 equals the damaged original" cmp -s work/runner/runs/gE3d/files/arel-backup/Save0.dat.1 "$DMG/Save0.dat"
+
+# ---- Device: the installed build (CC-5).
+check "$APK hash equals $APK.sha256" test "$(sha $APK)" = "$(cat $APK.sha256 2>/dev/null)"
+got=$(bash scripts/app installed-sha)
+check "CC-5 the installed $DEV_PKG APK hash equals the build ($got)" test "$got" = "$(sha $APK)"
+adbs shell dumpsys package $DEV_PKG </dev/null | tr -d '\r' >"$EV/dumpsys-package.txt"
+check "the installed build is debuggable" grep -q 'DEBUGGABLE' "$EV/dumpsys-package.txt"
+adbs shell cmd package query-activities --brief -a android.intent.action.MAIN -c android.intent.category.LAUNCHER $DEV_PKG </dev/null | tr -d '\r' >"$EV/launchers.txt"
+check "TASK-E3.4 the manifest has the ArelImport launcher activity" grep -q "$DEV_PKG/com.gamevil.nexus2.ArelImport" "$EV/launchers.txt"
+check "app launch resolves the game launcher, not ArelImport ($(bash scripts/app game-activity))" bash -c "bash scripts/app game-activity | grep -q '^$DEV_PKG/' && ! bash scripts/app game-activity | grep -q ArelImport"
+logcat_checks() { # NAME [EXPECT_CRASH]
+  bash scripts/app logcat "$EV/logcat-$1.txt"
+  grep -E "$(P e1_logcat_bad_regex)" "$EV/logcat-$1.txt" >"$EV/logcat-hits-$1.txt"
+  if [ -z "${2:-}" ]; then
+    check "CC-5 $1: app logcat has no FATAL, ANR, JNI DETECTED, dlopen failed or bridge crash report" test ! -s "$EV/logcat-hits-$1.txt"
+  fi
+}
+result() { runas cat files/arel-import-result.txt | tr -d '\r' >"$EV/import-result-$1.txt"; cat "$EV/import-result-$1.txt"; }
+
+# ---- GC-E3.3 adb route (debug): a set in files/arel-import-in/, then ArelImport with "staged".
+clean_dev
+adbs logcat -c
+runas mkdir -p files/arel-import-in
+for f in $TS/*; do adbs exec-in "run-as $DEV_PKG sh -c 'cat > files/arel-import-in/$(basename "$f")'" <"$f"; done
+wake; bash scripts/app import -S --activity-clear-task --ez staged true; sleep 4; focus_log import-adb
+result adb
+check "GC-E3.3 adb route: ArelImport reports a complete import" grep -q '^Import complete: 3 files' "$EV/import-result-adb.txt"
+play saves-get "$EV/after-adb"
+check "GC-E3.3 adb route: the dev package saves equal the test save copy" same_set "$EV/after-adb" $TS
+ui_tap '^ok$'; sleep 2
+check "the OK button stops the process after an import" test -z "$(bash scripts/app pid)"
+logcat_checks import-adb
+
+# ---- GC-E3.3 and GC-E3.5, file picker route, over a present save set (the p-shop saves of the runner).
+play saves-put work/runner/runs/gE3p/files
+play saves-get "$EV/before-picker"
+check "GC-E3.5 the present set before the import is the p-shop save set, byte-equal" same_set "$EV/before-picker" work/runner/runs/gE3p/files
+adbs exec-out "run-as $DEV_PKG sh -c 'rm -f files/arel-import-result.txt'" </dev/null
+adbs shell "rm -rf /sdcard/Download/arel-import-test; mkdir -p /sdcard/Download/arel-import-test" </dev/null
+for f in $TS/*; do adbs push "$f" /sdcard/Download/arel-import-test/ >/dev/null; done
+adbs logcat -c
+before=$(runas ls -1 files/arel-backup 2>/dev/null | tr -d '\r' | sort)
+wake; bash scripts/app import -S --activity-clear-task --es initial "$(P e3_picker_initial_uri)"; sleep 4; focus_log import-picker
+bash scripts/app shot "$EV/picker.png"
+ui_tap "$(P e3_picker_use_regex)"; sleep 2
+ui_tap "$(P e3_picker_allow_regex)"; sleep 4
+result picker
+check "GC-E3.3 picker route: ArelImport reports a complete import" grep -q '^Import complete: 3 files' "$EV/import-result-picker.txt"
+play saves-get "$EV/after-picker"
+check "GC-E3.3 picker route: the dev package saves equal the test save copy (Save1.dat and Sng1.dat are gone)" same_set "$EV/after-picker" $TS
+new=$(comm -13 <(echo "$before") <(runas ls -1 files/arel-backup | tr -d '\r' | sort) | grep '^import-' | head -1)
+echo "new backup folder: $new"
+check "GC-E3.5 a new folder files/arel-backup/import-<time>/" test -n "$new"
+get_dir "arel-backup/$new" "$EV/import-backup"
+check "GC-E3.5 files/arel-backup/$new holds the old set (p-shop saves), byte-equal" same_set "$EV/import-backup" work/runner/runs/gE3p/files
+ui_tap '^ok$'; sleep 2
+logcat_checks import-picker
+# The imported save loads: title, Continue, slot 1 (macro to_worldmap). The test save is at Stage 1.
+launch
+play steps to_worldmap
+check "GC-E3.3 to_worldmap macro ran on the imported save" test $? = 0
+sleep 3
+play dbglog "$EV/dbg-picker.txt"
+grep -P '\tprobe ' "$EV/dbg-picker.txt" >"$EV/probes-picker.txt"
+check "GC-E3.3 slot 1 of the imported save loads to the world map at the test save values (state 5, $(P e3_testsave_probe))" grep -qP "\tprobe state 5 $(P e3_testsave_probe)\$" "$EV/probes-picker.txt"
+logcat_checks picker-load
+
+# ---- GC-E3.4 (TASK-E3.5) on the device: a damaged save, then Continue and slot 1.
+play saves-put "$DMG"
+adbs exec-out "run-as $DEV_PKG sh -c 'rm -rf files/arel-backup'" </dev/null
+launch
+play steps to_worldmap
+sleep 5
+play dbglog "$EV/dbg-damaged.txt"
+get_dir arel-backup "$EV/damaged-backup"
+check "GC-E3.4 files/arel-backup/Save0.dat.1 equals the damaged original" cmp -s "$EV/damaged-backup/Save0.dat.1" "$DMG/Save0.dat"
+play saves-get "$EV/after-damaged"
+check "TASK-E3.5 device: the game deleted the damaged Save0.dat" test ! -e "$EV/after-damaged/Save0.dat"
+logcat_checks damaged expect-crash
+check "TASK-E3.5 device: the bridge crash report names CInventory::EncryptSave, as the original" grep -q 'EncryptSave' "$EV/logcat-damaged.txt"
+grep -E "$(P e1_logcat_bad_regex)" "$EV/logcat-damaged.txt" | grep -vE 'RUNNER CRASH at frame [0-9]+: guest read of unmapped address 0x00000014 \(pc 0x100bd722\)|FATAL guest read of unmapped address 0x00000014 \(pc 0x100bd722\)' >"$EV/logcat-hits-damaged-other.txt"
+check "CC-5 damaged: no bad logcat line other than the expected guest crash" test ! -s "$EV/logcat-hits-damaged-other.txt"
+
+# ---- Clean up: the dev package saves and arel-* files, the picker folder.
+bash scripts/app stop
+clean_dev
+adbs shell "rm -rf /sdcard/Download/arel-import-test /sdcard/Download/arel-ui.xml /sdcard/Download/ui.xml" </dev/null
+check "the picker folder is gone" test -z "$(adbs shell ls -d /sdcard/Download/arel-import-test 2>/dev/null </dev/null | grep -v 'No such')"
+check "CC-1 installed v1 APK hash is unchanged at the end" test "$(v1_installed_sha)" = "$V1_APK_SHA"
+gate_end

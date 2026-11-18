@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# Phase E4 exit gate (PLAN.md 10, Phase E4): native replacements.
+# Usage: emu/scripts/gates/gate-E4
+# The gate builds the runner and the reference oracle (runner setup, ref-oracle setup). It does not build
+# or install the APK. The phone must have dist/arelemu-debug.apk installed (emu/scripts/app install: the
+# owner accepts it on the phone). Nobody touches the phone during the device part. About 30 minutes.
+# Vector suites: work/vec/*.vec (emu/scripts/vec-proof gen); their SHA-256 values are in params.json (e4_vec_sha256).
+source "$(dirname "$0")/../env.sh"
+source scripts/gates/lib.sh
+gate_start E4
+P() { node -p "require('./scripts/gates/params.json').$1"; }
+SUITES="leaves1 leaves2 s16 alpha auto exhdr flip enlarge fx outline u16 screen fade text prim wave hiparam"
+TS=docs/saves/testsave
+
+# GC-E4.4: CC-1 to CC-8 (CC-5 in the device part, CC-8 in GC-E4.3).
+common_checks
+artefact_check
+phone_up || { fail "phone $SERIAL connected"; gate_end; }
+bash scripts/runner setup >"$EV/runner-setup.txt" 2>&1
+check "runner setup" grep -q 'runner setup done' "$EV/runner-setup.txt"
+bash scripts/ref-oracle setup >"$EV/ref-setup.txt" 2>&1
+check "reference oracle setup" grep -q 'ref-oracle setup done' "$EV/ref-setup.txt"
+
+# ---- The suites are the recorded ones.
+for s in $SUITES; do
+  check "suite $s: work/vec/$s.vec has the recorded SHA-256" test "$(sha work/vec/$s.vec)" = "$(P "e4_vec_sha256.$s")"
+done
+
+# ---- GC-E4.1 (TASK-E4.4): every suite on the reference oracle, the runner with replacements off, and on.
+for side in ref off on; do bash scripts/vec-proof run $side $SUITES >"$EV/vec-$side.txt" 2>&1; done
+bash scripts/vec-proof cmp $SUITES >"$EV/vec-cmp.txt" 2>&1
+for s in $SUITES; do
+  check "GC-E4.1 $s: 0 differences, reference oracle against runner off and on" grep -qE "^$s [0-9]+ cases: off ok on ok\$" "$EV/vec-cmp.txt"
+done
+cp work/runner/runs/von-*/summary.txt "$EV/" 2>/dev/null
+for s in $SUITES; do cp "work/runner/runs/von-$s/summary.txt" "$EV/summary-on-$s.txt"; done
+cat "$EV"/summary-on-*.txt | awk -F'\t' '/^native_calls/{print $2}' | sort -u >"$EV/replacements-called.txt"
+adbs shell "$PHONE_DIR/run/arel-emu -native-list" </dev/null | tr -d '\r' >"$EV/replacements-all-fam.txt"
+cut -f2 "$EV/replacements-all-fam.txt" | sort >"$EV/replacements-all.txt"
+check "GC-E4.1 the suites call every replacement ($(wc -l <"$EV/replacements-called.txt") of $(wc -l <"$EV/replacements-all.txt"))" \
+  cmp -s "$EV/replacements-called.txt" "$EV/replacements-all.txt"
+for s in $SUITES; do
+  [ "$(grep -c '^native_calls' "work/runner/runs/voff-$s/summary.txt")" = 0 ] || fail "GC-E4.1 $s: the off run called a replacement"
+done
+
+# ---- GC-E4.2 (TASK-E4.4): each mutation makes its suite fail.
+bash scripts/vec-mutate >"$EV/mutate.txt" 2>&1
+check "GC-E4.2 every mutation is caught ($(grep -c ': caught' "$EV/mutate.txt") caught)" bash -c "! grep -qv ': caught' '$EV/mutate.txt' && [ -s '$EV/mutate.txt' ]"
+
+# ---- GC-E4.3 (TASK-E4.5) and CC-8: all parity scripts with all replacements on.
+bash scripts/parity-native all >"$EV/parity.txt" 2>&1
+for n in p-session p-heavy p-newgame p-shop p-shop-load; do
+  check "GC-E4.3 $n with all replacements: hashes and probes equal the reference oracle" grep -qE "^$n: hashes ok, probes ok" "$EV/parity.txt"
+done
+check "GC-E4.3 p-shop with all replacements: the save files equal the reference" grep -q '^p-shop: .*saves ok' "$EV/parity.txt"
+check "CC-8 runner p-session gives the reference oracle hashes (replacements on)" grep -q '^p-session: hashes ok' "$EV/parity.txt"
+
+# ---- Device: the app with all replacements (CC-5). The test save, to_worldmap and clear_stage.
+got=$(bash scripts/app installed-sha)
+check "CC-5 the installed dev APK equals dist/arelemu-debug.apk" test "$got" = "$(sha dist/arelemu-debug.apk)"
+play() { bash scripts/play "$@"; }
+adbs shell input keyevent WAKEUP </dev/null; adbs shell wm dismiss-keyguard </dev/null
+play saves-clear; play saves-put $TS
+adbs logcat -c
+bash scripts/app stop; bash scripts/app launch; sleep "$(P e1_launch_wait_sec)"
+check "CC-5 mCurrentFocus is our activity" play focused
+play steps to_worldmap && play steps clear_stage
+check "device: to_worldmap and clear_stage ran with all replacements" test $? = 0
+sleep 3
+play dbglog "$EV/dbg.txt"
+check "device: the test save reached the world map (probe state 5)" grep -qP '\tprobe state 5 ' "$EV/dbg.txt"
+bash scripts/app logcat "$EV/logcat.txt"
+# The debug log, not logcat: the phone dropped the boot lines of logcat (run gate-E4-20261110-233205).
+n_all=$(wc -l <"$EV/replacements-all.txt")
+check "device: the bridge turned on all $n_all replacements (debug log)" grep -qP "^0\tnative $n_all of $n_all replacements on$" "$EV/dbg.txt"
+grep -E "$(P e1_logcat_bad_regex)" "$EV/logcat.txt" >"$EV/logcat-hits.txt"
+check "CC-5 app logcat has no FATAL, ANR, JNI DETECTED, dlopen failed or bridge crash report" test ! -s "$EV/logcat-hits.txt"
+bash scripts/app stop
+play saves-clear
+
+# ---- TASK-E4.3: the whole start set of DES-12 has replacements (with the families of session 2).
+for fam in leaves PutCompressImg Blt fade wave prim text; do
+  check "TASK-E4.3 family $fam has replacements" grep -q "^$fam	" "$EV/replacements-all-fam.txt"
+done
+check "TASK-E4.3 the prim family has its 9 functions" test "$(grep -c '^prim	' "$EV/replacements-all-fam.txt")" = 9
+check "TASK-E4.3 DrawText is a replacement" grep -qx "text	_ZN8CGxBFont8DrawTextEPKciiiibb" "$EV/replacements-all-fam.txt"
+# ---- TASK-E4.6 and TASK-E4.7: the records.
+check "TASK-E4.6 docs/PERF.md has the p-heavy table and the prof table" bash -c "grep -q '^| Runner, \`-native all\`, 3 |' docs/PERF.md && grep -q '^| \`-native all\` |' docs/PERF.md"
+check "TASK-E4.7 docs/NATIVE.tsv has one row for each replacement ($n_all)" test "$(($(wc -l <docs/NATIVE.tsv) - 1))" = "$n_all"
+check "TASK-E4.7 docs/NATIVE.tsv names the same replacements as -native-list" cmp -s <(tail -n +2 docs/NATIVE.tsv | cut -f2 | sort) "$EV/replacements-all.txt"
+check "TASK-E4.7 docs/NATIVE.md has no 'Not ported' row" bash -c "! grep -q 'Not ported' docs/NATIVE.md"
+check "CC-1 installed v1 APK hash is unchanged at the end" test "$(v1_installed_sha)" = "$V1_APK_SHA"
+gate_end

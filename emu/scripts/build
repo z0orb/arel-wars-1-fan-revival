@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+# Builds the emu APK (PLAN.md DES-15, TASK-E1.3). A copy of v1 scripts/build with these changes:
+#   - the v1 patch copies in shell/patches/v1/, then the emu patches in shell/patches/emu/
+#   - the dev package io.github.z0orb.arelwars.emudev and its label (E1 keeps the v1 target 28)
+#   - lib/armeabi/ goes. lib/arm64-v8a/ and lib/x86_64/ get the bridge, lib/armeabi-v7a/ gets the guest
+#   - native libraries are stored, and zipalign aligns them to 16 KB pages
+#   - the dev key signs it. Output: emu/dist/arelemu-VARIANT.apk only
+# Usage: emu/scripts/build [debug|release]   (default debug). Needs build-core for both 64-bit ABIs.
+# Reads only: ../original, ../tools/apktool. Writes only: emu/work/shell-VARIANT, emu/work/bridge, emu/dist.
+source "$(dirname "$0")/env.sh"
+shopt -s nullglob
+VARIANT=${1:-debug}
+case "$VARIANT" in debug|release|public) ;; *) echo "usage: emu/scripts/build [debug|release|public]" >&2; exit 2 ;; esac
+
+# E8 (TASK-E8.2, Q-2 option 2): "public" is the release APK with only a new manifest (the public package
+# io.github.z0orb.arelwars and the label "Arel Wars") and the release key. Every other entry keeps its
+# bytes, so the gates of the release build also test the public APK (tools/apk-diff.mjs checks it).
+# It needs "build release" first. Output: dist/arelwars-public.apk.
+if [ "$VARIANT" = public ]; then
+  R=work/shell-release; W=work/shell-public; rel=dist/arelemu-release.apk
+  [ -f "$rel" ] && [ "$(sha "$rel")" = "$(cat "$rel.sha256")" ] || { echo "build release first" >&2; exit 1; }
+  [ -f "$R/decoded/AndroidManifest.xml" ] || { echo "no $R/decoded: build release first" >&2; exit 1; }
+  [ -f keys/release.jks ] && [ -f keys/release.pass ] || { echo "no release key in emu/keys/" >&2; exit 1; }
+  rm -rf "$W"; mkdir -p "$W"
+  ops=(shell/patches/v1/manifest/*.json shell/patches/public/0001-public-package.json)
+  for f in shell/patches/emu/manifest/*.json; do [ "$(basename "$f")" = 0001-dev-package.json ] || ops+=("$f"); done
+  node tools/axml.mjs "$R/decoded/AndroidManifest.xml" "$W/AndroidManifest.xml" "${ops[@]}" >"$W/axml.log"
+  java tools/Transplant.java "$rel" "$W/transplanted.apk" "AndroidManifest.xml=$W/AndroidManifest.xml"
+  zipalign -P 16 -f 4 "$W/transplanted.apk" "$W/aligned.apk"
+  zipalign -c -P 16 4 "$W/aligned.apk"
+  out=dist/arelwars-public.apk
+  apksigner.bat sign --ks keys/release.jks --ks-pass file:keys/release.pass --ks-key-alias arelwars \
+    --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true --out "$out" "$W/aligned.apk"
+  rm -f "$out.idsig"
+  apksigner.bat verify --min-sdk-version 21 "$out"
+  node tools/apk-diff.mjs "$rel" "$out"
+  sha "$out" >"$out.sha256"
+  echo "$out $(cat "$out.sha256")"
+  exit 0
+fi
+APKTOOL=../tools/apktool/apktool_3.0.3.jar
+W=work/shell-$VARIANT
+PV1=shell/patches/v1
+PEMU=shell/patches/emu
+
+[ "$(sha "$ORIGINAL")" = "$ORIGINAL_SHA" ] || { echo "original APK hash mismatch" >&2; exit 1; }
+rm -rf "$W"; mkdir -p "$W/out" dist
+
+# 1. Java: decode, patch smali, assemble.
+java -jar "$APKTOOL" d --no-res -f -o "$W/decoded" "$ORIGINAL" >"$W/decode.log" 2>&1
+find "$W/decoded/smali" -name '*.smali' -exec sed -i 's/\r$//' {} +
+for p in $PV1/smali/*.patch $PEMU/smali/*.patch; do
+  echo "smali patch: $p"
+  patch -d "$W/decoded" -p1 --fuzz=0 --forward --batch --no-backup-if-mismatch -i "$PWD/$p" >>"$W/patch.log" || { cat "$W/patch.log" >&2; exit 1; }
+done
+# Emu Java classes (shell/src, for example ArelImport of DES-14): javac against compile-time stand-ins
+# of the game classes (not packaged), d8, then apktool decodes the dex to smali in the decoded tree.
+J=$W/java; mkdir -p "$J/stub/com/gamevil/nexus2/xml" "$J/cls" "$J/dex"
+cat >"$J/stub/com/gamevil/nexus2/xml/NexusUtils.java" <<'STUB'
+package com.gamevil.nexus2.xml;
+public class NexusUtils { public static String getDeviceID(android.content.Context c) { return null; } }
+STUB
+ANDROID_JAR=$(cygpath -m "$LOCALAPPDATA/Android/Sdk/platforms/android-37.0/android.jar")
+mapfile -t jsrc < <(find shell/src -name '*.java')
+javac --release 8 -nowarn -Xlint:-options -cp "$ANDROID_JAR" -d "$J/cls" "$J/stub/com/gamevil/nexus2/xml/NexusUtils.java" "${jsrc[@]}" >"$J/javac.log" 2>&1 || { cat "$J/javac.log" >&2; exit 1; }
+rm -rf "$J/cls/com/gamevil/nexus2/xml"
+mapfile -t jcls < <(find "$J/cls" -name '*.class')
+d8.bat --lib "$ANDROID_JAR" --min-api 21 --output "$J/dex" "${jcls[@]}" >"$J/d8.log" 2>&1 || { cat "$J/d8.log" >&2; exit 1; }
+(cd "$J/dex" && jar cf ../wrap.apk classes.dex)
+java -jar "$APKTOOL" d -f --no-res --no-assets -o "$J/dec" "$J/wrap.apk" >"$J/dec.log" 2>&1
+find "$J/dec/smali" -name '*.smali' -exec sed -i 's/\r$//' {} +
+cp -r "$J/dec/smali/." "$W/decoded/smali/"
+echo "emu Java: $(find "$J/dec/smali" -name '*.smali' | wc -l) smali files"
+java -jar "$APKTOOL" b -j 1 "$W/decoded" -o "$W/assembled.apk" >"$W/assemble.log" 2>&1
+unzip -q -o "$W/assembled.apk" classes.dex -d "$W/out"
+
+# 2. Manifest: the v1 ops, then the emu ops (package, label), then debuggable for debug.
+ops=($PV1/manifest/*.json $PEMU/manifest/*.json)
+[ "$VARIANT" = debug ] && ops+=($PEMU/debuggable.json)
+node tools/axml.mjs "$W/decoded/AndroidManifest.xml" "$W/out/AndroidManifest.xml" "${ops[@]}" >"$W/axml.log"
+
+# 3. The guest: the v1 binary patches on the original library (DES-03). Its hash must equal params.json.
+replacements=("classes.dex=$W/out/classes.dex" "AndroidManifest.xml=$W/out/AndroidManifest.xml")
+node tools/bytepatch.mjs "$W/out" "$W/decoded" $PV1/binary/*.json >"$W/bytepatch.log"
+GUEST=$W/out/lib/armeabi/libgameDSO.so
+want=$(node -p "require('./scripts/gates/params.json').guest_sha256")
+[ "$(sha $GUEST)" = "$want" ] || { echo "patched guest hash $(sha $GUEST) is not $want" >&2; exit 1; }
+
+# 4. Text patches (as v1).
+while IFS= read -r entry; do
+  entry=${entry%$'\r'}; replacements+=("$entry=$W/out/$entry")
+done < <(node tools/zt1text.mjs "$W/out" "$W/decoded" $PV1/text/*.json)
+
+# 5. The bridge for both 64-bit ABIs: trampolines from the guest exports and this dex.
+dexdump.exe -d "$W/out/classes.dex" >"$W/dexdump.txt" 2>/dev/null
+BUILD_VARIANT=$VARIANT GUEST_SO=$GUEST DEXDUMP=$W/dexdump.txt bash scripts/build-bridge arm64-v8a lib
+BUILD_VARIANT=$VARIANT GUEST_SO=$GUEST DEXDUMP=$W/dexdump.txt bash scripts/build-bridge x86_64 lib
+
+# 6. Assemble: delete lib/armeabi/, add the three ABI folders (stored), align, sign.
+java tools/Transplant.java "$ORIGINAL" "$W/transplanted.apk" "${replacements[@]}" \
+  "lib/armeabi/libgameDSO.so=-" \
+  "+lib/arm64-v8a/libgameDSO.so=work/bridge/arm64-v8a/libgameDSO.so" \
+  "+lib/armeabi-v7a/libgameDSO.so=$GUEST" \
+  "+lib/x86_64/libgameDSO.so=work/bridge/x86_64/libgameDSO.so" \
+  "+assets/emu/NOTICE.txt=docs/NOTICE.md"
+zipalign -P 16 -f 4 "$W/transplanted.apk" "$W/aligned.apk"
+zipalign -c -P 16 4 "$W/aligned.apk"
+out=dist/arelemu-$VARIANT.apk
+apksigner.bat sign --ks "$DEV_KEY" --ks-pass "file:$DEV_KEY_PASS" --ks-key-alias "$DEV_KEY_ALIAS" \
+  --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true --out "$out" "$W/aligned.apk"
+rm -f "$out.idsig"
+apksigner.bat verify --min-sdk-version 21 "$out"
+sha "$out" >"$out.sha256"
+echo "$out $(cat "$out.sha256")"

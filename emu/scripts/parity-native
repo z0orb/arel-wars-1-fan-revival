@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Session parity with native replacements (PLAN.md DES-12 step 5, TASK-E4.5, GC-E4.3).
+# Runs every parity script on the runner with -native SPEC (default all) and compares the frame
+# hashes (columns 1 to 3 of frames.tsv), the probes and, for p-shop, the written save files with the
+# stored reference outputs in work/ref/.
+#   emu/scripts/parity-native [SPEC]   prints "NAME: hashes ok|DIFF, probes ok|DIFF[, saves ok|DIFF]"; exit 1 on a difference
+# Needs emu/scripts/runner setup.
+source "$(dirname "$0")/env.sh"
+SPEC=${1:-all}
+P() { node -p "require('./scripts/gates/params.json').$1"; }
+cols() { cut -f1-3 "$1"; }
+rc=0
+# NAME SAVE FRAMES
+RUNS="p-session docs/saves/testsave $(P p_session_frames)
+p-heavy $(P p_heavy_save) $(P p_heavy_frames)
+p-newgame none $(P p_newgame_frames)
+p-shop $(P p_heavy_save) $(P e3_p_shop_frames)
+p-shop-load work/ref/p-shop/files $(P e3_p_shop_load_frames)"
+while read -r name save frames; do
+  quiet=-quiet-sound; [ "$name" = p-newgame ] && quiet=""
+  bash scripts/runner run "n-$name" "$save" -- -native "$SPEC" -frames "$frames" -script "scripts/parity/$name.txt" -probe every:10 $quiet \
+    >"work/runner/n-$name.txt" 2>&1 || { echo "$name: the run failed (work/runner/n-$name.txt)"; rc=1; continue; }
+  out=work/runner/runs/n-$name ref=work/ref/$name
+  line="$name:"
+  if cmp -s <(cols "$out/frames.tsv") <(cols "$ref/frames.tsv"); then line="$line hashes ok"; else line="$line hashes DIFF"; rc=1; fi
+  if cmp -s "$out/probes.jsonl" "$ref/probes.jsonl"; then line="$line, probes ok"; else line="$line, probes DIFF"; rc=1; fi
+  if [ "$name" = p-shop ]; then
+    # Only the save files: the runner also writes files/arel-backup/ (DIVERGENCES.md row 7).
+    if diff -r -x arel-backup "$out/files" "$ref/files" >/dev/null; then line="$line, saves ok"; else line="$line, saves DIFF"; rc=1; fi
+  fi
+  calls=$(awk -F'\t' '/^native_calls/{n+=$3} END{print n+0}' "$out/summary.txt")
+  echo "$line ($frames frames, $calls native calls)"
+done <<<"$RUNS"
+exit $rc

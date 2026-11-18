@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# Lifecycle device gate (PLAN.md TASK-E5.3, GC-E5.3, GC-E5.5): a port of v1 scripts/gates/gate-5 for the dev
+# package. Usage: emu/scripts/gates/device-life [debug|release ...]   (default: debug release)
+# It plays on the test save (docs/saves/testsave: slot 1, Stage 1, a unit equipped, the tutorial answer),
+# because it quits a battle. It backs up the saves of the dev package first and puts them back at the end.
+# It installs the dev package when the installed APK is another variant (the owner accepts the prompt).
+# Taps are v1 screen pixels. scripts/play maps them to the box of ArelInsets. Nobody touches the phone.
+source "$(dirname "$0")/../env.sh"
+source scripts/gates/lib.sh
+source scripts/gates/devlib.sh
+dev_start device-life "$@"
+variants=("$@"); [ ${#variants[@]} -gt 0 ] || variants=(debug release)
+phone_up || { fail "phone $SERIAL connected"; gate_end; }
+v1_before=$(v1_installed_sha)
+swap_in_test_save || gate_end
+for v in "${variants[@]}"; do
+  testsave_for "$v" && pass "$v: installed, test save in place" || fail "$v: installed, test save in place"
+  launch
+  check "$v: to_worldmap ran" play steps to_worldmap
+
+  # GC-E5.3: the corner tap map. Corners run on the world map, which is nearly still. In battle every frame
+  # changes, so a tap that missed would still pass. Each control must change the screen a lot, then close.
+  n=$(P e5_corners)
+  check "$v: four corners defined ($n)" test "$n" -ge 4
+  for ((i = 0; i < n; i++)); do
+    b=$(shot "corner$i-before-$v")
+    play steps "corner$i"; sleep 3
+    a=$(shot "corner$i-after-$v")
+    c=$(changed "$b" "$a")
+    check "GC-E5.3 $v: corner $i tap opens its control (changed $c, min $(P e5_corner_min_change))" at_least "$c" "$(P e5_corner_min_change)"
+    play steps "corner_ret$i"; sleep 3
+    r=$(shot "corner$i-return-$v")
+    c=$(changed "$b" "$r")
+    check "GC-E5.3 $v: corner $i closes again (changed $c, max $(P e5_corner_return_max_change))" at_most "$c" "$(P e5_corner_return_max_change)"
+  done
+
+  check "$v: to_battle ran" play steps to_battle
+  f1=$(shot "battle1-$v"); sleep 2; f2=$(shot "battle2-$v")
+  # The macro can run with a missed tap and stay on the map. The unit column must match the v1 golden.
+  c=$(region "$f2" e5_battle)
+  check "$v: reached battle (unit column changed $c against the v1 golden)" region "$f2" e5_battle
+  c=$(changed "$f1" "$f2")
+  check "$v: frames advance in battle (changed $c)" at_least "$c" 0.0025
+
+  pid=$(app_pid); cycles=$(P e5_lock_cycles); good=0
+  for ((i = 1; i <= cycles; i++)); do
+    adbs shell input keyevent SLEEP </dev/null; sleep 2; wake; sleep 3
+    s=$(shot "lock-$v"); same=$(app_pid)
+    # The focus check stops a lock screen from counting as a resumed game.
+    if [ -n "$pid" ] && [ "$same" = "$pid" ] && play focused && node tools/screen.mjs not-black "$s" >/dev/null; then good=$((good + 1)); fi
+  done
+  check "GC-E5.5 $v: $cycles lock cycles keep the PID, the focus and lit frames ($good good)" test "$good" = "$cycles"
+  dev_checks "$v"
+
+  # A resume in battle opens the pause menu of the game, which has no sound. Music comes back on unpause.
+  check "$v: unpause ran" play steps unpause
+  sleep 3
+  adbs shell dumpsys audio </dev/null | tr -d '\r' >"$EV/audio-$v.txt"
+  check "$v: dumpsys audio shows an active player after resume" grep -Eq "u/pid:[^ ]*/$pid .*state:started" "$EV/audio-$v.txt"
+
+  check "$v: exit_game ran" play steps exit_game
+  sleep 3
+  check "$v: the exit of the game ends the process" test -z "$(app_pid)"
+  # Read the log before it is cleared, or a crash during the exit stays hidden.
+  bash scripts/app logcat "$EV/logcat-exit-$v.txt"
+  grep -E "$(P e1_logcat_bad_regex)" "$EV/logcat-exit-$v.txt" | grep -Ev "$(P e5_logcat_ignore_regex)" >"$EV/logcat-exit-hits-$v.txt"
+  check "$v: no crash during the exit" test ! -s "$EV/logcat-exit-hits-$v.txt"
+  # A start from the launcher icon after the exit, with no force-stop.
+  adbs logcat -c </dev/null
+  bash scripts/app front
+  sleep "$(P e5_launch_wait_sec)"
+  dev_checks "$v"
+  s=$(shot "relaunch-$v")
+  check "$v: a start after the exit works without force-stop" node tools/screen.mjs not-black "$s"
+  play steps title_tap; sleep 3
+  a=$(shot "relaunch-tap-$v")
+  c=$(changed "$s" "$a")
+  check "$v: a tap works after the new start (changed $c)" at_least "$c" "$(P e5_title_tap_min_change)"
+
+  # GC-E5.5: force-stop, then a new start.
+  bash scripts/app stop; sleep 1
+  check "$v: force-stop ends the process" test -z "$(app_pid)"
+  launch
+  s=$(shot "forcestop-$v")
+  play steps title_tap; sleep 3
+  a=$(shot "forcestop-tap-$v")
+  c=$(changed "$s" "$a")
+  check "$v: a tap works after force-stop and a new start (changed $c)" at_least "$c" "$(P e5_title_tap_min_change)"
+
+  # GC-E5.5: adb install -r over the running app. The process stops, and the save stays.
+  h0=$(save_hash "$v")
+  install_v "$v" && pass "$v: adb install -r" || fail "$v: adb install -r"
+  launch
+  h1=$(save_hash "$v")
+  check "$v: the save set survives adb install -r ($h1)" test -n "$h0" -a "$h0" = "$h1"
+  check "$v: to_worldmap ran after adb install -r" play steps to_worldmap
+  play dbglog "$EV/dbg-install-$v.txt" 2>/dev/null
+  w=$(shot "install-worldmap-$v")
+  b=$(shot "install-worldmap-$v-b")
+  c=$(changed "$w" "$b")
+  check "$v: the world map after adb install -r is still (changed $c)" at_most "$c" 0.02
+  dev_checks "$v"
+  bash scripts/app stop
+done
+put_back_saves "${variants[-1]}"
+check "CC-1 installed v1 APK hash is unchanged ($v1_before)" test "$(v1_installed_sha)" = "$V1_APK_SHA" -a "$v1_before" = "$V1_APK_SHA"
+gate_end

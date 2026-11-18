@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Builds dynarmic (A32 frontend only) and its libraries for one ABI with NDK r27d (PLAN.md DES-15, TASK-E0.3).
+# Usage: emu/scripts/build-core ABI   (arm64-v8a or x86_64)
+# Inputs: the pinned archives in third_party/archives (hashes in docs/TOOLS.md and third_party/archives.sha256).
+# Output: work/core/ABI/install (static libraries and headers).
+source "$(dirname "$0")/env.sh"
+ABI=${1:?usage: emu/scripts/build-core ABI}
+case "$ABI" in arm64-v8a|x86_64) ;; *) echo "ABI must be arm64-v8a or x86_64" >&2; exit 2 ;; esac
+CMAKE="$SDK/cmake/3.31.6/bin/cmake.exe"
+NINJA="$SDK/cmake/3.31.6/bin/ninja.exe"
+(cd third_party/archives && sha256sum -c --quiet ../archives.sha256)
+
+# Unpack the sources once: dynarmic with each external in its submodule folder.
+SRC=work/core-src
+if [ ! -f $SRC/.done ]; then
+  rm -rf $SRC; mkdir -p $SRC/tmp
+  for f in third_party/archives/*.tar.gz; do tar xzf "$f" -C $SRC/tmp; done
+  mv $SRC/tmp/dynarmic-* $SRC/dynarmic
+  for pair in fmt:fmt mcl:mcl oaknut:oaknut robin-map:robin-map xbyak:xbyak zycore-c:zycore zydis:zydis; do
+    from=${pair%%:*}; to=${pair##*:}
+    rm -rf $SRC/dynarmic/externals/$to; mv $SRC/tmp/$from-* $SRC/dynarmic/externals/$to
+  done
+  mv $SRC/tmp/ext-boost-* $SRC/boost
+  rmdir $SRC/tmp
+  touch $SRC/.done
+fi
+
+B=work/core/$ABI
+W=$(cygpath -m "$E")
+"$CMAKE" -G Ninja -S $SRC/dynarmic -B $B/build \
+  -DCMAKE_MAKE_PROGRAM="$(cygpath -m "$NINJA")" \
+  -DCMAKE_TOOLCHAIN_FILE="$(cygpath -m "$NDK")/build/cmake/android.toolchain.cmake" \
+  -DANDROID_ABI=$ABI -DANDROID_PLATFORM=21 -DANDROID_STL=c++_static \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX="$W/$B/install" \
+  -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+  -DCMAKE_SHARED_LINKER_FLAGS="-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384" \
+  -DCMAKE_EXE_LINKER_FLAGS="-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384" \
+  -DBoost_INCLUDE_DIR="$W/$SRC/boost" -DBoost_NO_SYSTEM_PATHS=ON \
+  -DDYNARMIC_FRONTENDS=A32 -DDYNARMIC_TESTS=OFF -DDYNARMIC_WARNINGS_AS_ERRORS=OFF \
+  -DDYNARMIC_USE_PRECOMPILED_HEADERS=OFF -DDYNARMIC_ENABLE_NO_EXECUTE_SUPPORT=OFF \
+  -DDYNARMIC_USE_BUNDLED_EXTERNALS=ON
+"$CMAKE" --build $B/build -j "$(nproc)"
+"$CMAKE" --install $B/build >/dev/null
+echo "build-core $ABI done: $(ls $B/install/lib*/*.a | tr '\n' ' ')"

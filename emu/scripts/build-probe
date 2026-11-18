@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# Builds the E0 probe APK (PLAN.md TASK-E0.8): package io.github.z0orb.arelwars.emuprobe, debuggable,
+# dev key, arm64-v8a only. It holds the runner code as a JNI library, the guest, the original assets,
+# a copy of the owner's save and the p-heavy script. Writes only under emu/work/probe and emu/dist.
+# Usage: emu/scripts/build-probe   (needs emu/scripts/build-core arm64-v8a first)
+source "$(dirname "$0")/env.sh"
+W=work/probe
+SAVE=docs/saves/mirror-20261109
+rm -rf $W; mkdir -p $W/classes $W/dex $W/lib/arm64-v8a $W/assets/payload/guest $W/assets/payload/save dist
+JAR="$SDK/platforms/android-37.0/android.jar"
+C=work/core/arm64-v8a/install
+
+# Native library: the runner and bridge sources, with main renamed, plus the JNI wrapper.
+SRC="bridge/src/guest.cpp bridge/src/loader.cpp bridge/src/shims.cpp bridge/src/fmt.cpp bridge/src/jni_fake.cpp bridge/src/core_dynarmic.cpp"
+"$TC/clang++.exe" --target=aarch64-linux-android21 -std=c++20 -O2 -g -Wall -Wno-unused-parameter -fPIC -shared \
+  -I$C/include -Iwork/core-src/boost -Dmain=arel_emu_main \
+  -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384 -static-libstdc++ \
+  -o $W/lib/arm64-v8a/libemuprobe.so $SRC runner/src/main.cpp probe/jni/probe.cpp \
+  $C/lib/libdynarmic.a $C/lib/libmcl.a $C/lib/libfmt.a -llog -lm
+
+# Java.
+javac --release 11 -cp "$(cygpath -w "$JAR")" -d $W/classes probe/src/io/github/z0orb/arelwars/emuprobe/ProbeActivity.java
+d8.bat --min-api 21 --lib "$(cygpath -w "$JAR")" --output $W/dex $(find $W/classes -name '*.class')
+
+# Payload assets.
+bash scripts/guest >/dev/null
+cp work/guest/libgameDSO.so $W/assets/payload/guest/
+cp -r work/apk/assets $W/assets/payload/game
+cp $SAVE/* $W/assets/payload/save/
+cp scripts/parity/p-heavy.txt $W/assets/payload/
+
+# Link, add dex and lib, align, sign.
+aapt2 link -o $W/base.apk -I "$(cygpath -w "$JAR")" --manifest probe/AndroidManifest.xml
+(cd $W && jar uf0M base.apk -C dex classes.dex lib/arm64-v8a/libemuprobe.so assets)
+zipalign -p -f 16 $W/base.apk $W/aligned.apk
+out=dist/arelemu-probe.apk
+apksigner.bat sign --ks "$DEV_KEY" --ks-pass "file:$DEV_KEY_PASS" --ks-key-alias "$DEV_KEY_ALIAS" --out "$out" $W/aligned.apk
+apksigner.bat verify "$out"
+aapt2 dump badging "$out" | grep -E "^package:|native-code|sdkVersion|targetSdk"
+echo "$out $(sha "$out")"

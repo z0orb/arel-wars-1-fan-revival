@@ -1,0 +1,206 @@
+#!/usr/bin/env bash
+# Smoke test of one device (PLAN.md TASK-E6.2, GC-E6.2 to GC-E6.6). One run for each image, profile and ABI mode.
+# Usage: [AREL_SERIAL=emulator-5554] emu/scripts/gates/smoke VARIANT EXPECT_ABI [--resize] [--multiwindow] [--no-lock] [-- INSTALL FLAGS]
+#   VARIANT     debug or release. The save items need debug (run-as)
+#   EXPECT_ABI  the primaryCpuAbi that dumpsys package must show (arm64-v8a, x86_64, armeabi-v7a)
+#   --resize    the resize item (wm size). Only on an AVD: it changes a setting of the device, then resets it
+#   --multiwindow  the multi-window item (freeform window). Only on an AVD
+#   INSTALL FLAGS  extra flags for adb install -r, for example --abi armeabi-v7a
+# Items: install and start, the ABI line, the memory mode line of the bridge, the title tap, the letterbox,
+# a battle (the HUD against the v1 golden), the save after force-stop and a new start, back, resize,
+# lock and resume, and a clean logcat. It plays on the test save. It backs up the saves of the dev package
+# and puts them back. On the owner's phone it never changes a setting. Nobody touches the device.
+source "$(dirname "$0")/../env.sh"
+source scripts/gates/lib.sh
+source scripts/gates/devlib.sh
+v=${1:?usage: smoke VARIANT EXPECT_ABI [--resize] [--multiwindow] [-- INSTALL FLAGS]}; want_abi=${2:?EXPECT_ABI}; shift 2
+resize=0; multi=0; lock=1; flags=(); profile=${AREL_PROFILE:-phone}
+while [ $# -gt 0 ]; do
+  case "$1" in --resize) resize=1 ;; --multiwindow) multi=1 ;; --no-lock) lock=0 ;; --) shift; flags=("$@"); break ;; *) echo "bad argument $1"; exit 2 ;; esac
+  shift
+done
+# apks.txt line 1: gate-E6 selects evidence by these words (see gate-E6 sel). A --no-lock run adds " lock=0".
+# gate-E6 accepts a lock=0 run only for API 21, with the owner's waiver in docs/DEVICES.md (E6 session 5).
+lockw=; [ $lock = 1 ] || lockw=" lock=0"
+dev_start smoke "$v $want_abi profile=$profile resize=$resize multi=$multi flags=${flags[*]:-none}$lockw"
+phone_up || { fail "device $SERIAL connected"; gate_end; }
+on_phone=0; [ "$SERIAL" = "$PHONE_SERIAL" ] && on_phone=1
+# An AVD rounds the colours of the game frame differently (up to 8 for each channel). The v1 golden
+# compare on an AVD uses that tolerance. A scaled box (tablet43) also filters the edges of the pixel art
+# (up to 39), so a box of another size uses 32 (tools/screen.mjs). The phone keeps the exact compare (0).
+case "$SERIAL" in emulator-*) export AREL_TOL=8 AREL_TOL_SCALED=32 ;; *) export AREL_TOL=0 AREL_TOL_SCALED=0 ;; esac
+case "$SERIAL" in emulator-*) ;; *) [ $resize = 0 ] && [ $multi = 0 ] || { fail "--resize and --multiwindow only on an AVD"; gate_end; } ;; esac
+[ $on_phone = 1 ] && v1_before=$(v1_installed_sha)
+
+# Device facts, for the matrix in docs/DEVICES.md.
+gp() { adbs shell getprop "$1" </dev/null | tr -d '\r'; }
+{
+  echo "serial $SERIAL"
+  echo "sdk $(gp ro.build.version.sdk)"
+  echo "release $(gp ro.build.version.release)"
+  echo "abilist $(gp ro.product.cpu.abilist)"
+  echo "model $(gp ro.product.model)"
+  # getconf gives the page size that apps see. The x86_64 16 KB image emulates 16 KB pages: there
+  # getconf gives 16384, but KernelPageSize in smaps gives 4 kB. Old images have no getconf: use smaps.
+  ps=$(adbs shell getconf PAGE_SIZE </dev/null 2>/dev/null | tr -d '\r' | grep -E '^[0-9]+$' || true)
+  [ -n "$ps" ] || ps=$(( $(adbs shell cat /proc/self/smaps </dev/null | tr -d '\r' | sed -n 's/^KernelPageSize: *\([0-9]*\) kB/\1/p' | head -1) * 1024 ))
+  echo "page_size $ps"
+  echo "wm_size $(adbs shell wm size </dev/null | tr -d '\r' | tr '\n' ' ')"
+  echo "wm_density $(adbs shell wm density </dev/null | tr -d '\r' | tr '\n' ' ')"
+  echo "gles $(adbs shell dumpsys SurfaceFlinger </dev/null | tr -d '\r' | grep -m1 GLES)"
+  echo "native_bridge $(gp ro.dalvik.vm.native.bridge)"
+} >"$EV/device.txt"
+cat "$EV/device.txt"
+sdk=$(gp ro.build.version.sdk)
+
+# 1. Install and the ABI line.
+swap_in_test_save || gate_end
+install_v "$v" "${flags[@]}" && pass "$v installed (adb install -r ${flags[*]:-})" || { fail "$v installed"; put_back_saves; gate_end; }
+adbs shell dumpsys package $DEV_PKG </dev/null | tr -d '\r' >"$EV/dumpsys-package.txt"
+got_abi=$(abi)
+check "GC-E6.2 primaryCpuAbi is $want_abi (got $got_abi)" test "$got_abi" = "$want_abi"
+
+# 2. Start, the memory mode, the title and the letterbox.
+launch
+check "CC-5 our activity has the focus after the start" play focused
+adbs logcat -d -s ArelEmu:I </dev/null | tr -d '\r' >"$EV/arelemu-log.txt"
+mode=$(grep -o 'memory mode: .*' "$EV/arelemu-log.txt" | head -1 | sed 's/memory mode: //')
+echo "memory mode: ${mode:-none}" >>"$EV/device.txt"
+if [ "$want_abi" = armeabi-v7a ]; then
+  check "GC-E6.5 armeabi-v7a runs the guest as native code: no bridge log" test -z "$mode"
+else
+  check "GC-E6.5 the bridge log names its memory mode (${mode:-none})" test -n "$mode"
+  check "GC-E6.5 the core got JIT memory (mode $mode)" test "$mode" = RWX
+fi
+
+box_line() { adbs logcat -d -s ArelInsets:I </dev/null | tr -d '\r' | grep ' box ' | tail -1 | sed 's/.* box /box /'; }
+inside() { # shot name: every lit pixel is inside the box of ArelInsets, the box is 3:2 and in the safe area
+  local s=$EV/$1.png; bash scripts/app shot "$s"
+  local lb; lb=$(node tools/screen.mjs lit-box "$s"); echo "$1 lit-box $lb" >>"$EV/boxes.txt"
+  local bl; bl=$(box_line); echo "$1 $bl" >>"$EV/boxes.txt"
+  [ -n "$bl" ] || return 1
+  node -e '
+    const [W,H,x0,y0,x1,y1] = process.argv[1].split(" ").map(Number);
+    const t = process.argv[2].split(" ");
+    const [bx,by,bw,bh] = t.slice(1,5).map(Number), [ww,wh] = t.slice(6,8).map(Number), [sl,st,sr,sb] = t.slice(9,13).map(Number);
+    // On an AVD after "wm size" (API 21), the shot keeps the physical size and shows the smaller display in
+    // its centre. Move the box by that offset. Without wm size, the window fills the shot (offset 0).
+    const ox = (W - ww) / 2, oy = (H - wh) / 2;
+    const ok = ww <= W && wh <= H && Math.abs(bw * 2 - bh * 3) <= 3;
+    const inSafe = bx >= sl && by >= st && bx + bw <= ww - sr && by + bh <= wh - sb;
+    const litIn = x0 >= bx + ox && y0 >= by + oy && x1 <= bx + bw + ox && y1 <= by + bh + oy;
+    // E6 session 3: with "fill", the lit pixels must also reach each edge of the box (4 pixels or less).
+    // The API 26 AVD drew the game squeezed inside the box, and only the check "inside" passed.
+    const fill = process.argv[3] !== "fill" || Math.max(x0 - bx - ox, y0 - by - oy, bx + bw + ox - x1, by + bh + oy - y1) <= 4;
+    process.exit(ok && inSafe && litIn && fill ? 0 : 1);' "$lb" "$bl" "${2:-}"
+}
+check "GC-E6.6 title: the game pixels are inside the 3:2 box, the box is inside the safe area" inside title
+
+# 3. Battle: the macros of E5 (v1 screen pixels, mapped to the box).
+check "to_worldmap ran" play steps to_worldmap
+check "GC-E6.6 world map: the game pixels are inside the box and fill it" inside worldmap fill
+check "to_battle ran" play steps to_battle
+f1=$(shot battle1); sleep 2; f2=$(shot battle2)
+c=$(region "$f2" e5_battle)
+check "GC-E6.2 battle: the unit column matches the v1 golden (changed $c, max $(P e5_battle.max))" region "$f2" e5_battle
+c=$(changed "$f1" "$f2")
+check "GC-E6.2 frames advance in battle (changed $c)" at_least "$c" 0.0025
+# The armeabi-v7a path has no bridge, so it writes no debug log (E6). Its macros check the screen.
+haslog=0; [ "$v" = debug ] && [ "$want_abi" != armeabi-v7a ] && haslog=1
+if [ $haslog = 1 ]; then
+  play dbglog "$EV/dbg-battle.txt"
+  check "the debug log shows the world map (probe state 5)" grep -qP '\tprobe state 5 ' "$EV/dbg-battle.txt"
+fi
+
+# 4. Save, force-stop and a new start. The game writes the save when a stage starts.
+h_ts=$(set_hash $TS)
+if [ "$v" = debug ]; then
+  h1=$(save_hash debug)
+  check "the stage start wrote the save ($h1 is not the test save $h_ts)" test -n "$h1" -a "$h1" != "$h_ts"
+  bash scripts/app stop; sleep 1
+  check "force-stop ends the process" test -z "$(app_pid)"
+  h2=$(save_hash debug)
+  check "the save is the same after force-stop ($h2)" test "$h2" = "$h1"
+  launch
+  check "to_worldmap ran after force-stop (Continue loads the save)" play steps to_worldmap
+  play dbglog "$EV/dbg-relaunch.txt"
+  [ $haslog = 1 ] && check "the save loads after force-stop (probe state 5)" grep -qP '\tprobe state 5 ' "$EV/dbg-relaunch.txt"
+else
+  echo "SKIP  save items: $v has no run-as"
+fi
+
+# 5. Back on the main menu: the first back opens the "Close" popup, the second one changes nothing.
+bash scripts/app stop; launch
+play steps title_tap; sleep 6
+pid0=$(app_pid)
+bash scripts/app shot "$EV/back0.png"
+adbs shell input keyevent BACK </dev/null; sleep 3; bash scripts/app shot "$EV/back1.png"
+adbs shell input keyevent BACK </dev/null; sleep 3; bash scripts/app shot "$EV/back2.png"
+c1=$(changed "$EV/back0.png" "$EV/back1.png"); c2=$(changed "$EV/back1.png" "$EV/back2.png")
+check "GC-E6.6 the first back opens the exit popup (changed $c1, min $(P e5_back_popup_min_change))" at_least "$c1" "$(P e5_back_popup_min_change)"
+check "GC-E6.6 the second back leaves the popup as it is (changed $c2, max $(P e5_back_second_max_change))" at_most "$c2" "$(P e5_back_second_max_change)"
+check "GC-E6.6 back keeps the process and the focus" bash -c "[ -n '$pid0' ] && [ \"\$(bash scripts/app pid)\" = '$pid0' ] && bash scripts/play focused"
+
+# 6. Resize (AVD only): wm size to another aspect, then back. configChanges keep the activity: no restart.
+if [ $resize = 1 ]; then
+  bash scripts/app stop; launch; play steps title_tap; sleep 4
+  pid0=$(app_pid)
+  read -r pw ph <<<"$(adbs shell wm size </dev/null | tr -d '\r' | sed -n 's/Physical size: \([0-9]*\)x\([0-9]*\)/\1 \2/p')"
+  for sz in "$pw"x$((pw * 4 / 3)) "$pw"x$((pw * 2)) reset; do
+    adbs shell wm size "$sz" </dev/null; sleep 6
+    nm=resize-${sz/x/-}
+    check "GC-E6.6 resize $sz: the same process ($pid0)" test -n "$pid0" -a "$(app_pid)" = "$pid0"
+    check "GC-E6.6 resize $sz: our activity has the focus" play focused
+    check "GC-E6.6 resize $sz: the game pixels are inside the new 3:2 box" inside "$nm"
+    check "GC-E6.6 resize $sz: the frame is lit" node tools/screen.mjs not-black "$EV/$nm.png"
+  done
+  adbs shell wm size reset </dev/null
+  check "resize: a tap still works (title to main menu)" play steps title_tap
+fi
+
+# 7. Multi-window (AVD only): a freeform window. The box must fit the window, and the game must run.
+if [ $multi = 1 ]; then
+  adbs shell settings put global enable_freeform_support 1 </dev/null
+  adbs shell settings put global force_resizable_activities 1 </dev/null
+  bash scripts/app stop; adbs logcat -c
+  c=$(bash scripts/app game-activity)
+  adbs shell am start --windowingMode 5 -n "$c" </dev/null >"$EV/multiwindow-start.txt" 2>&1
+  sleep "$(P e5_launch_wait_sec)"
+  adbs shell dumpsys activity activities </dev/null | tr -d '\r' >"$EV/multiwindow-activities.txt"
+  bl=$(box_line); echo "multiwindow $bl" >>"$EV/boxes.txt"
+  check "GC-E6.6 multi-window: the app runs in a freeform window" grep -q 'mode=freeform\|windowingMode=5' "$EV/multiwindow-activities.txt"
+  check "GC-E6.6 multi-window: ArelInsets logs a 3:2 box inside its window" node -e '
+    const t = process.argv[1].split(" "); if (t[0] !== "box") process.exit(1);
+    const [bx,by,bw,bh,ww,wh] = [1,2,3,4,6,7].map(i => Number(t[i]));
+    process.exit(Math.abs(bw * 2 - bh * 3) <= 3 && bx >= 0 && by >= 0 && bx + bw <= ww && by + bh <= wh ? 0 : 1);' "${bl:-none}"
+  s1=$(shot multiwindow1); sleep 3; s2=$(shot multiwindow2)
+  check "GC-E6.6 multi-window: the frame is lit" node tools/screen.mjs not-black "$s1"
+  adbs shell settings put global enable_freeform_support 0 </dev/null
+  adbs shell settings put global force_resizable_activities 0 </dev/null
+  bash scripts/app stop
+fi
+
+# 8. Lock and resume. --no-lock skips it: on the API 21 AVD, WAKEUP after SLEEP freezes the whole AVD, also
+# with no app of ours installed (E6 session 5). The owner waived this item for API 21 only.
+if [ $lock = 1 ]; then
+bash scripts/app stop; launch; play steps title_tap; sleep 4
+pid=$(app_pid); cycles=3; good=0
+for ((i = 1; i <= cycles; i++)); do
+  adbs shell input keyevent SLEEP </dev/null; sleep 2; wake; sleep 3
+  s=$(shot "lock$i")
+  if [ -n "$pid" ] && [ "$(app_pid)" = "$pid" ] && play focused && node tools/screen.mjs not-black "$s" >/dev/null; then good=$((good + 1)); fi
+done
+check "GC-E6.2 $cycles lock cycles keep the PID, the focus and lit frames ($good good)" test "$good" = "$cycles"
+else
+  echo "SKIP  GC-E6.2 lock cycles (--no-lock, owner waiver for API 21)"
+fi
+
+# 9. Logcat and the installed build.
+dev_checks "$v"
+bash scripts/app stop
+put_back_saves
+[ ${#flags[@]} -gt 0 ] && { install_v debug && pass "debug installed again with no flags" || fail "debug installed again with no flags"; }
+if [ $on_phone = 1 ]; then
+  check "CC-1 installed v1 APK hash is unchanged ($v1_before)" test "$(v1_installed_sha)" = "$V1_APK_SHA" -a "$v1_before" = "$V1_APK_SHA"
+fi
+gate_end

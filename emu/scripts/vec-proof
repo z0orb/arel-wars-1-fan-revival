@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# Vector proof of the native replacements (PLAN.md DES-12, TASK-E4.4).
+#   emu/scripts/vec-proof gen                 write the suites into work/vec/ with the 8.4 jars
+#                                             (universal/work/build/*.jar, read only; output only under emu/)
+#   emu/scripts/vec-proof run SIDE SUITE...   SIDE: ref (reference oracle, output to work/ref/vec/SUITE.txt),
+#                                             off (runner, -native none) or on (runner, all replacements).
+#                                             Output to work/vec/out/SIDE-SUITE.txt
+#   emu/scripts/vec-proof cmp SUITE...        compare off and on against ref; prints "SUITE N cases: off ok|DIFF, on ok|DIFF"
+# Needs emu/scripts/runner setup and emu/scripts/ref-oracle setup first.
+# Env: NATIVE (runner -native spec for "on", default all), AREL_NATIVE_MUT (passed to the runner, mutation check).
+source "$(dirname "$0")/env.sh"
+SUITES_ALL="leaves1 leaves2 s16 alpha auto exhdr flip enlarge fx outline u16 screen fade text prim wave"
+# The proof suites: SUITES_ALL and the derived suite hiparam.
+SUITES_PROOF="$SUITES_ALL hiparam"
+cmd=${1:-}; shift || true
+case "$cmd" in
+gen)
+  CP="../universal/work/build/engine.jar;../universal/work/build/desktop.jar"
+  mkdir -p work/vec
+  for s in ${*:-$SUITES_ALL}; do java -cp "$CP" arel.desktop.Vec gen "$s" ../universal/work/assets/assets "work/vec/$s.vec" | tail -1; done
+  # Derived suite "hiparam": the leaves1 cases with a u16 parameter above 0xffff (tools/vec-hiparam.mjs)
+  node tools/vec-hiparam.mjs work/vec/leaves1.vec work/vec/hiparam.vec
+  ;;
+run)
+  side=$1; shift
+  mkdir -p work/vec/out work/ref/vec
+  for s in "$@"; do
+    [ -f "work/vec/$s.vec" ] || { echo "no work/vec/$s.vec: run vec-proof gen" >&2; exit 1; }
+    case "$side" in
+    ref)
+      bash scripts/ref-oracle run "vref-$s" -- -vec "work/vec/$s.vec" >"work/vec/out/ref-$s.log" 2>&1 || { echo "ref $s failed (work/vec/out/ref-$s.log)" >&2; exit 1; }
+      cp "work/ref-oracle/runs/vref-$s/vec.txt" "work/ref/vec/$s.txt"
+      sha "work/vec/$s.vec" >"work/ref/vec/$s.vec.sha256"
+      ;;
+    off|on)
+      spec=none; [ "$side" = on ] && spec=${NATIVE:-all}
+      mut=""; [ -n "${AREL_NATIVE_MUT:-}" ] && mut="AREL_NATIVE_MUT=$AREL_NATIVE_MUT "
+      if [ -n "$mut" ]; then
+        # The runner script has no env pass-through: use a wrapper on the phone.
+        adbs shell "cd $PHONE_DIR/run && printf '#!/system/bin/sh\nexport AREL_NATIVE_MUT=%s\nexec ./arel-emu \"\$@\"\n' $AREL_NATIVE_MUT > arel-emu-mut && chmod 755 arel-emu-mut" </dev/null
+      fi
+      RUNNER_BIN=${mut:+arel-emu-mut} bash scripts/runner run "v$side-$s" -- -native "$spec" -vec "work/vec/$s.vec" >"work/vec/out/$side-$s.log" 2>&1 || { echo "$side $s failed (work/vec/out/$side-$s.log)" >&2; exit 1; }
+      cp "work/runner/runs/v$side-$s/vec.txt" "work/vec/out/$side-$s.txt"
+      ;;
+    *) echo "SIDE must be ref, off or on" >&2; exit 2 ;;
+    esac
+    o=work/vec/out/$side-$s.txt; [ "$side" = ref ] && o=work/ref/vec/$s.txt
+    echo "$side $s: $(wc -l <"$o") lines"
+  done
+  ;;
+cmp)
+  rc=0
+  for s in "$@"; do
+    r=work/ref/vec/$s.txt
+    [ "$(cat "work/ref/vec/$s.vec.sha256" 2>/dev/null)" = "$(sha "work/vec/$s.vec")" ] || { echo "$s: the reference is not for this case file"; rc=1; continue; }
+    line="$s $(wc -l <"$r") cases:"
+    for side in off on; do
+      if cmp -s "$r" "work/vec/out/$side-$s.txt"; then line="$line $side ok"
+      else line="$line $side DIFF($(diff "$r" "work/vec/out/$side-$s.txt" 2>/dev/null | grep -c '^<' || true))"; rc=1; fi
+    done
+    echo "$line"
+  done
+  exit $rc
+  ;;
+*) echo "usage: emu/scripts/vec-proof gen [SUITE...] | run ref|off|on SUITE... | cmp SUITE..."; exit 2 ;;
+esac

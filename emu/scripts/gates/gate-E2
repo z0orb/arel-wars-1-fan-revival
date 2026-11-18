@@ -1,0 +1,161 @@
+#!/usr/bin/env bash
+# Phase E2 exit gate (PLAN.md 10, Phase E2): full JNI, sound, input and lifecycle.
+# Usage: emu/scripts/gates/gate-E2
+# The gate does not build or install. The phone must have dist/arelemu-debug.apk installed
+# (emu/scripts/app install: the owner accepts it on the phone). The gate deletes the saves of the dev
+# package (never of v1), plays on fresh data and on a copy of the v1 test save, and reads the debug log
+# of the bridge (bridge.cpp dbg, TASK-E2.2). About 20 minutes.
+source "$(dirname "$0")/../env.sh"
+source scripts/gates/lib.sh
+gate_start E2
+P() { node -p "require('./scripts/gates/params.json').$1"; }
+cols() { cut -f1-3 "$1"; }
+APK=dist/arelemu-debug.apk
+play() { bash scripts/play "$@"; }
+pid() { bash scripts/app pid; }
+alive() { grep -P '^\d+\talive$' "$1" | tail -1 | cut -f1; }   # last frame with an alive line
+dbg_now() { play dbglog "$EV/dbg-now.txt"; alive "$EV/dbg-now.txt"; }
+# WAKEUP first: with nobody at the phone, the screen sleeps between the parts of the gate.
+launch() { adbs shell input keyevent WAKEUP </dev/null; adbs shell wm dismiss-keyguard </dev/null; bash scripts/app stop; bash scripts/app launch; sleep "$(P e1_launch_wait_sec)"; focus_log launch; }
+# The focused window, for the evidence when a focus check fails.
+focus_log() { echo "focus at $1: $(adbs shell dumpsys window </dev/null | tr -d '\r' | grep mCurrentFocus | head -1)"; }
+
+# GC-E2.1: CC-1 to CC-6 and CC-8.
+common_checks
+phone_up || { fail "phone $SERIAL connected"; gate_end; }
+bash scripts/runner setup >"$EV/runner-setup.txt" 2>&1
+check "runner builds and pushes" grep -q 'runner setup done' "$EV/runner-setup.txt"
+bash scripts/runner run gE2s docs/saves/testsave -- -frames "$(P p_session_frames)" -script scripts/parity/p-session.txt -probe every:10 -quiet-sound >"$EV/session.txt" 2>&1
+check "CC-8 runner p-session hashes equal the reference oracle" cmp -s <(cols work/runner/runs/gE2s/frames.tsv) <(cols work/ref/p-session/frames.tsv)
+# The device macros of TASK-E2.1, converted to a runner script (scripts/parity/p-newgame.txt).
+bash scripts/runner run gE2n none -- -frames "$(P p_newgame_frames)" -script scripts/parity/p-newgame.txt -probe every:10 >"$EV/newgame-runner.txt" 2>&1
+check "runner p-newgame hashes equal the reference oracle (work/ref/p-newgame)" cmp -s <(cols work/runner/runs/gE2n/frames.tsv) <(cols work/ref/p-newgame/frames.tsv)
+check "runner p-newgame probes equal the reference oracle" cmp -s work/runner/runs/gE2n/probes.jsonl work/ref/p-newgame/probes.jsonl
+
+# CC-5: the installed build.
+check "$APK hash equals $APK.sha256" test "$(sha $APK)" = "$(cat $APK.sha256 2>/dev/null)"
+got=$(bash scripts/app installed-sha)
+check "CC-5 the installed $DEV_PKG APK hash equals the build ($got)" test "$got" = "$(sha $APK)"
+adbs shell dumpsys package $DEV_PKG </dev/null | tr -d '\r' >"$EV/dumpsys-package.txt"
+check "the installed build is debuggable (CheckJNI on, debug log on)" grep -q 'DEBUGGABLE' "$EV/dumpsys-package.txt"
+grep -o 'Java_com_gamevil_nexus2_Natives_[A-Za-z_]*' work/bridge/gen/exports.cpp | sed 's/^Java_com_gamevil_nexus2_Natives_//' | sort -u >"$EV/exports.txt"
+
+# Checks on one debug log (GC-E2.2): no slot trap, no re-entry, no unexported RegisterNatives name,
+# no upcall that ended in an exception, and timer callbacks only on the UI thread.
+log_checks() { # NAME FILE
+  local n=$1 f=$2
+  check "TASK-E2.2 $n: the debug log has slot lines" grep -qP '\tslot \d+ ' "$f"
+  check "TASK-E2.2 $n: the debug log has upcall lines" grep -qP '\tupcall ' "$f"
+  check "GC-E2.2 $n: no slot trap" bash -c "! grep -qP '\tslot-trap ' '$f'"
+  check "GC-E2.2 $n: no re-entry" bash -c "! grep -qP '\tre-entry ' '$f'"
+  grep -oP '\tRegisterNatives \K\S+' "$f" | sort -u | comm -23 - "$EV/exports.txt" >"$EV/regnat-unexported-$n.txt"
+  check "GC-E2.2 $n: no RegisterNatives name without a bridge export" test ! -s "$EV/regnat-unexported-$n.txt"
+  check "GC-E2.2 $n: no upcall ended in a Java exception" bash -c "! grep -qP '\tupcall .* -> exception$' '$f'"
+  local t; t=$(grep -cP '\tentry NativeAsyncTimerCallBack' "$f")
+  echo "$n: $t timer callback entries"
+  check "TASK-E2.4 $n: each timer callback runs on the UI thread ($t entries)" bash -c "! grep -P '\tentry NativeAsyncTimerCallBack' '$f' | grep -qv ' ui$'"
+}
+logcat_checks() { # NAME
+  bash scripts/app logcat "$EV/logcat-$1.txt"
+  grep -E "$(P e1_logcat_bad_regex)" "$EV/logcat-$1.txt" >"$EV/logcat-hits-$1.txt"
+  check "CC-5 $1: app logcat has no FATAL, ANR, JNI DETECTED, dlopen failed or bridge crash report" test ! -s "$EV/logcat-hits-$1.txt"
+  check "$1: no method lookup failed" bash -c "! grep -q 'MethodID .* -> null' '$EV/logcat-$1.txt'"
+}
+
+# ---- Run A, TASK-E2.1 to E2.3: fresh data, the new game and the first Stage 1 battle to a win.
+play saves-clear || fail "saves of $DEV_PKG deleted"
+launch
+check "CC-5 mCurrentFocus is our activity" play focused
+play steps new_game && play steps first_battle
+check "TASK-E2.1 new_game and first_battle macros ran" test $? = 0
+sleep 5
+play dbglog "$EV/dbg-newgame.txt"
+log_checks newgame "$EV/dbg-newgame.txt"
+grep -P '\tprobe ' "$EV/dbg-newgame.txt" >"$EV/probes-newgame.txt"
+check "TASK-E2.1 a new game starts with 0 Gold and 0 Cash" grep -qP '\tprobe state 5 gold 0 cash 0 ' "$EV/probes-newgame.txt"
+check "TASK-E2.1 the Stage 1 battle ends in a win: Gold 6, Cash 12, stage 1" grep -qP '\tprobe state 4 gold 6 cash 12 stage 1$' "$EV/probes-newgame.txt"
+check "TASK-E2.1 back on the world map after the win" grep -qP '\tprobe state 5 gold 6 cash 12 stage 1$' "$EV/probes-newgame.txt"
+# TASK-E2.3: the sound IDs of the device equal those of the reference oracle for the same macro.
+grep -oP '\tupcall OnSoundPlay \S+ \(\K\d+' "$EV/dbg-newgame.txt" | sort -n | uniq >"$EV/sound-ids-device.txt"
+grep -oP 'sound play \K\d+' work/ref/p-newgame/log.txt | sort -n | uniq >"$EV/sound-ids-ref.txt"
+echo "sound IDs: device $(tr '\n' ' ' <"$EV/sound-ids-device.txt")/ reference $(tr '\n' ' ' <"$EV/sound-ids-ref.txt")"
+check "TASK-E2.3 the device plays the sound IDs of the reference oracle ($(wc -l <"$EV/sound-ids-ref.txt") IDs)" cmp -s "$EV/sound-ids-device.txt" "$EV/sound-ids-ref.txt"
+grep -cP '\tupcall OnSoundPlay ' "$EV/dbg-newgame.txt" >"$EV/sound-count-device.txt"
+logcat_checks newgame
+bash scripts/app shot "$EV/newgame-map.png"
+
+# ---- Run B, GC-E2.3: the test save copy, the v1 macros to_worldmap and clear_stage.
+play saves-put docs/saves/testsave || fail "test save copied into $DEV_PKG"
+launch
+play steps to_worldmap && play steps clear_stage
+check "GC-E2.3 to_worldmap and clear_stage macros ran" test $? = 0
+sleep 5
+play dbglog "$EV/dbg-testsave.txt"
+log_checks testsave "$EV/dbg-testsave.txt"
+grep -P '\tprobe state 5 ' "$EV/dbg-testsave.txt" >"$EV/probes-testsave-map.txt"
+read -r g0 c0 <<<"$(head -1 "$EV/probes-testsave-map.txt" | awk '{print $6, $8}')"
+read -r g1 c1 <<<"$(tail -1 "$EV/probes-testsave-map.txt" | awk '{print $6, $8}')"
+echo "test save on the map: Gold $g0 -> $g1, Cash $c0 -> $c1"
+check "GC-E2.3 the Stage 1 win adds 6 Gold (Gold $g0 -> $g1)" test -n "$g0" -a "$((g1 - g0))" = 6
+check "GC-E2.3 the Stage 1 win adds 12 Cash (Cash $c0 -> $c1)" test -n "$c0" -a "$((c1 - c0))" = 12
+play saves-get "$EV/saves-after-win"
+check "the win wrote a save that differs from the test save" bash -c "! cmp -s docs/saves/testsave/Save0.dat '$EV/saves-after-win/Save0.dat'"
+logcat_checks testsave
+
+# ---- TASK-E2.4 and GC-E2.4: home, lock cycles in a battle, unpause, exit.
+play saves-put docs/saves/testsave || fail "test save copied into $DEV_PKG again"
+launch
+play steps to_worldmap && play steps to_battle
+check "TASK-E2.4 to_worldmap and to_battle macros ran" test $? = 0
+p0=$(pid); f0=$(dbg_now)
+check "TASK-E2.4 the battle runs (frame $f0)" test -n "$f0"
+adbs shell input keyevent HOME </dev/null; sleep 3
+check "TASK-E2.4 HOME: our activity loses the focus" bash -c "! bash scripts/play focused"
+# The alive line comes every 128 frames (about 6 s), so wait 10 s.
+bash scripts/app front; sleep 10  # not monkey: from E3 the APK has two launcher entries
+f1=$(dbg_now); focus_log "back from HOME"
+check "TASK-E2.4 back from HOME: same process, focused, frames advance ($f0 -> $f1)" bash -c "[ '$(pid)' = '$p0' ] && bash scripts/play focused && [ '${f1:-0}' -gt '${f0:-0}' ]"
+good=0; cycles=$(P e2_lock_cycles)
+for ((i = 1; i <= cycles; i++)); do
+  a=$(dbg_now); play lock-cycle; sleep 8; b=$(dbg_now)  # alive comes every 128 frames
+  echo "lock cycle $i: frames $a -> $b, pid $(pid)"; focus_log "lock cycle $i"
+  if [ "$(pid)" = "$p0" ] && play focused && [ "${b:-0}" -gt "${a:-0}" ]; then good=$((good + 1)); fi
+done
+bash scripts/app shot "$EV/after-locks.png"
+check "GC-E2.4 $cycles lock cycles in a battle: same process, focused, frames advance after each ($good good)" test "$good" = "$cycles"
+play steps unpause; sleep 3
+adbs shell dumpsys audio </dev/null | tr -d '\r' >"$EV/audio.txt"
+check "TASK-E2.4 an active audio player after unpause" grep -Eq "u/pid:[^ ]*/$p0 .*state:started" "$EV/audio.txt"
+play dbglog "$EV/dbg-life.txt"
+log_checks life "$EV/dbg-life.txt"
+check "TASK-E2.4 the lifecycle called NativePauseClet and NativeResumeClet" bash -c "grep -qP '\tentry NativePauseClet' '$EV/dbg-life.txt' && grep -qP '\tentry NativeResumeClet' '$EV/dbg-life.txt'"
+play steps exit_game; sleep 3
+check "TASK-E2.4 exit ends the process (patch 0004-exit)" test -z "$(pid)"
+logcat_checks life
+
+# ---- TASK-E2.5: the help view. The guest has no live text-input upcall (universal/spec/jni-contract.md).
+launch
+bash scripts/app shot "$EV/help-before.png"
+play steps help
+bash scripts/app shot "$EV/help.png"
+c=$(node tools/screen.mjs pixels-changed "$EV/help-before.png" "$EV/help.png")
+check "TASK-E2.5 HELP opens the help view (changed $c, min $(P e2_help_min_change))" node -e "process.exit($c >= $(P e2_help_min_change) ? 0 : 1)"
+p1=$(pid)
+adbs shell input keyevent BACK </dev/null; sleep 3
+bash scripts/app shot "$EV/help-back.png"
+check "TASK-E2.5 BACK closes the help view: same process, focused" bash -c "[ -n '$p1' ] && [ '$(pid)' = '$p1' ] && bash scripts/play focused"
+play dbglog "$EV/dbg-help.txt"
+check "TASK-E2.5 the guest called showHelpView" grep -qP '\tupcall showHelpView ' "$EV/dbg-help.txt"
+log_checks help "$EV/dbg-help.txt"
+cat "$EV"/dbg-*.txt | grep -oP '\tupcall \K(Nexus\w*|getTextFromKeyboard|getNumberFromKeyboard)' | sort -u >"$EV/text-upcalls.txt"
+check "TASK-E2.5 no text-input upcall in any run" test ! -s "$EV/text-upcalls.txt"
+logcat_checks help
+bash scripts/app stop
+play saves-clear
+
+# GC-E2.5: the owner checked the audio by ear.
+check "GC-E2.5 docs/OWNER.md has 'emu-audio: yes'" grep -Eq '^emu-audio: yes\b' docs/OWNER.md
+
+# v1 did not change during the device work.
+check "installed v1 APK hash unchanged after the device work" test "$(v1_installed_sha)" = "$V1_APK_SHA"
+gate_end

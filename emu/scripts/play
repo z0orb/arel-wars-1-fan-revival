@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+# Device play helpers for the dev package (PLAN.md TASK-E2.1 to E2.5). Only io.github.z0orb.arelwars.emudev.
+#   emu/scripts/play steps NAME          run the macro e2_macros.NAME of scripts/gates/params.json
+#   emu/scripts/play saves-clear         delete the save files and the debug log of the dev package
+#   emu/scripts/play saves-put DIR       copy Save%d.dat, Sng%d.dat and option.sav from DIR (byte-exact)
+#   emu/scripts/play saves-get DIR       copy the save files of the dev package to DIR
+#   emu/scripts/play dbglog FILE         copy arelemu-debug.log (debug builds, bridge.cpp dbg) to FILE
+#   emu/scripts/play lock-cycle          screen off for 2 s, then on, and dismiss the keyguard
+#   emu/scripts/play focused             exit 0 if our activity has the focus
+# Macro steps: "title X Y" (a tap, checked in the debug log, max 3 tries), "tap X Y", "dtap X Y" (two taps in one adb shell), "key CODE", "sleep S".
+# Tap positions are screen pixels in the v1 game box. play maps them to the box that ArelInsets logs (E5).
+# Taps go only to our app: a step stops the macro if another window has the focus or the keyguard shows.
+source "$(dirname "$0")/env.sh"
+cmd=${1:-}; shift || true
+runas() { adbs exec-out run-as $DEV_PKG "$@" </dev/null; }
+# One file name per line. Old toolbox ls (API 21) has no -1, and toybox ls through exec-out prints columns (E6).
+lsfiles() { adbs exec-out "run-as $DEV_PKG sh -c 'cd files && for f in *; do echo \$f; done'" </dev/null; }
+focused() { adbs shell dumpsys window </dev/null | tr -d '\r' | grep mCurrentFocus | head -1 | grep -q "$DEV_PKG/"; }
+keyguard() { adbs shell dumpsys activity activities </dev/null | tr -d '\r' | grep -q 'mKeyguardShowing=true'; }
+case "$cmd" in
+steps)
+  name=${1:?usage: play steps NAME}
+  steps=$(node -e "const m=require('./scripts/gates/params.json').e2_macros['$name']; if(!m) process.exit(1); console.log(m.join('\n'))") \
+    || { echo "no macro e2_macros.$name" >&2; exit 1; }
+  if keyguard; then echo "lock screen is showing, not running $name" >&2; exit 1; fi
+  # E5: the macros use the v1 game box (x 372, y 0, 1620 x 1080). From target 35, ArelInsets puts the box
+  # inside the safe area and logs it ("box X Y W H ..."). Map each tap from the v1 box to that box.
+  # The last box goes in work/arel-box-$SERIAL.txt, for when logcat has lost the line. No line: the v1 box.
+  bl=$(adbs logcat -d -s ArelInsets:I </dev/null | tr -d '\r' | grep ' box ' | tail -1 | sed 's/.* box /box /' || true)
+  if [ -n "$bl" ]; then echo "$bl" >work/arel-box-$SERIAL.txt; elif [ -s work/arel-box-$SERIAL.txt ]; then bl=$(cat work/arel-box-$SERIAL.txt); fi
+  read -r _ BX BY BW BH _ <<<"${bl:-box 372 0 1620 1080}"
+  mapxy() { X=$(( BX + ($1 - 372) * BW / 1620 )); Y=$(( BY + $2 * BH / 1080 )); }
+  while IFS= read -r s <&3; do
+    set -- $s
+    case "$1" in tap|dtap|title) mapxy "$2" "$3"; set -- "$1" "$X" "$Y" ;; esac
+    case "$1" in
+      tap|dtap|title)
+        # The phone locks itself during long runs. Wake it and dismiss the keyguard once, then check again.
+        if ! focused; then
+          adbs shell input keyevent WAKEUP </dev/null; adbs shell wm dismiss-keyguard </dev/null; sleep 2
+          if ! focused; then
+            echo "our app is not focused, not sending: $s ($(adbs shell dumpsys window </dev/null | tr -d '\r' | grep mCurrentFocus | head -1))" >&2
+            exit 1
+          fi
+          echo "woke the phone before: $s" >&2
+        fi ;;
+    esac
+    case "$1" in
+      title)
+        # The first tap after a start is sometimes lost before it reaches the guest (gate-E2 run
+        # 20261109-121332). Tap, then check in the debug log that a touch-down event arrived. Max 3 tries.
+        # A release build and the native armeabi-v7a path (no bridge) write no debug log. Then check the
+        # screen against the screen before the first try: a tap on the title changes it a lot (v1 min 0.2),
+        # and with no tap it only blinks (max 0.05). A fade can take more than 2 s, so wait 3 s.
+        ok=0
+        # adb exec-out gives exit 0 also when run-as fails (release). So test the output, not the exit code.
+        haslog=0
+        [ "$(adbs exec-out "run-as $DEV_PKG sh -c 'test -f arelemu-debug.log && echo yes'" </dev/null 2>/dev/null | tr -d '\r')" = yes ] && haslog=1
+        for try in 1 2 3; do
+          if [ $haslog = 1 ]; then
+            before=$(runas cat arelemu-debug.log 2>/dev/null | grep -c 'handleCletEvent 23 ' || true)
+          elif [ $try = 1 ]; then
+            adbs exec-out screencap -p </dev/null >work/title-before-$SERIAL.png
+          fi
+          adbs shell input tap "$2" "$3" </dev/null; sleep 2
+          [ $haslog = 1 ] || sleep 1
+          if [ $haslog = 1 ]; then
+            after=$(runas cat arelemu-debug.log 2>/dev/null | grep -c 'handleCletEvent 23 ' || true)
+            if [ "$after" -gt "$before" ]; then ok=1; break; fi
+          else
+            adbs exec-out screencap -p </dev/null >work/title-after-$SERIAL.png
+            c=$(node tools/screen.mjs pixels-changed work/title-before-$SERIAL.png work/title-after-$SERIAL.png)
+            if node -e "process.exit($c >= 0.15 ? 0 : 1)"; then ok=1; break; fi
+          fi
+          echo "title tap $try did not reach the guest, again" >&2
+        done
+        [ $ok = 1 ] || { echo "title tap did not reach the guest after 3 tries" >&2; exit 1; } ;;
+      tap) adbs shell input tap "$2" "$3" </dev/null ;;
+      dtap) adbs shell "input tap $2 $3; input tap $2 $3" </dev/null ;;
+      key) adbs shell input keyevent "$2" </dev/null ;;
+      sleep) sleep "$2" ;;
+      *) echo "unknown step: $s" >&2; exit 1 ;;
+    esac
+  done 3<<<"$steps"
+  ;;
+saves-clear)
+  adbs shell am force-stop $DEV_PKG </dev/null
+  # One string: adb joins its arguments with spaces and drops the quotes.
+  adbs exec-out "run-as $DEV_PKG sh -c 'rm -f files/Save*.dat files/Sng*.dat files/option.sav arelemu-debug.log'" </dev/null
+  left=$(lsfiles 2>/dev/null | tr -d '\r' | grep -E '^(Save[0-9]+\.dat|Sng[0-9]+\.dat|option\.sav)$' || true)
+  [ -z "$left" ] || { echo "save files left: $left" >&2; exit 1; }
+  ;;
+saves-put)
+  src=${1:?usage: play saves-put DIR}
+  [ -s "$src/option.sav" ] || { echo "$src has no option.sav" >&2; exit 1; }
+  bash scripts/play saves-clear || exit 1
+  # A new install has no files/ folder before the first start (API 21 AVD, E6).
+  runas mkdir -p files >/dev/null 2>&1 || true
+  for f in "$src"/*; do
+    case "$(basename "$f")" in Save*.dat|Sng*.dat|option.sav) ;; *) continue ;; esac
+    # Push the file to the phone folder, then copy it with run-as. The device shell (not the app)
+    # opens the source file, and the pipe stays on the device, so each byte stays the same.
+    # Not exec-in: on API 26 and 28 it gives exit 0 and writes no file. Not adb shell with data
+    # from the PC: it changes \r (E6).
+    b=$(basename "$f"); tmp=$PHONE_DIR/saves-in/$b
+    adbs shell mkdir -p $PHONE_DIR/saves-in </dev/null
+    adbs push "$f" "$tmp" >/dev/null 2>&1 || { echo "adb push of $b failed" >&2; exit 1; }
+    adbs shell "run-as $DEV_PKG sh -c 'cat > files/$b' < $tmp" </dev/null
+    adbs shell rm -f "$tmp" </dev/null
+    runas chmod 600 "files/$b"
+  done
+  # On an API 21 AVD, exec-in can return before the write on the device ends. Check up to 3 times.
+  for try in 1 2 3; do
+    chk=$(mktemp -d); bash scripts/play saves-get "$chk"; bad=""
+    for f in "$src"/*; do
+      case "$(basename "$f")" in Save*.dat|Sng*.dat|option.sav) cmp -s "$f" "$chk/$(basename "$f")" || bad=$(basename "$f") ;; esac
+    done
+    rm -rf "$chk"
+    [ -z "$bad" ] && break
+    sleep 2
+  done
+  [ -z "$bad" ] || { echo "copy of $bad differs" >&2; exit 1; }
+  ;;
+saves-get)
+  dir=${1:?usage: play saves-get DIR}; mkdir -p "$dir"
+  for n in $(lsfiles | tr -d '\r' | grep -E '^(Save[0-9]+\.dat|Sng[0-9]+\.dat|option\.sav)$' || true); do
+    runas cat "files/$n" >"$dir/$n"
+  done
+  ;;
+dbglog) runas cat arelemu-debug.log | tr -d '\r' >"${1:?usage: play dbglog FILE}" ;;
+lock-cycle)
+  adbs shell input keyevent SLEEP </dev/null; sleep 2
+  adbs shell input keyevent WAKEUP </dev/null; adbs shell wm dismiss-keyguard </dev/null; sleep 3
+  ;;
+focused) focused ;;
+*) echo "usage: emu/scripts/play steps|saves-clear|saves-put|saves-get|dbglog|lock-cycle|focused" >&2; exit 2 ;;
+esac

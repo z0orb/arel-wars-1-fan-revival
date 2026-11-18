@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+# AVDs of the compatibility matrix (PLAN.md TASK-E6.1, TASK-E6.3). The AVD files live in emu/work/avd/.
+#   emu/scripts/avd create NAME IMAGE PROFILE   IMAGE: android-35/default/x86_64 (a folder under system-images)
+#                                               PROFILE: phone209 | small | tablet43 | fold (see below)
+#   emu/scripts/avd start NAME [PORT]           cold boot, no window, no snapshot. Waits for boot. Prints the serial
+#   emu/scripts/avd stop SERIAL                 kill the emulator of SERIAL
+#   emu/scripts/avd list                        the AVDs in emu/work/avd/
+# Uses only the SDK emulator and the SDK system images. Writes only under emu/work/avd/ and emu/logs/.
+source "$(dirname "$0")/env.sh"
+mkdir -p work/avd
+# The emulator is a Windows program: give it Windows paths.
+export ANDROID_AVD_HOME="$(cygpath -w "$E/work/avd")" ANDROID_SDK_ROOT="$(cygpath -w "$SDK")" ANDROID_HOME="$(cygpath -w "$SDK")"
+EMU="$SDK/emulator/emulator.exe"
+cmd=${1:-}; shift || true
+case "$cmd" in
+create)
+  name=${1:?NAME}; img=${2:?IMAGE}; prof=${3:-phone209}
+  [ -f "$SDK/system-images/$img/system.img" ] || { echo "no image $img" >&2; exit 1; }
+  # Portrait sizes, as a device reports them. The game is landscape, so the window gets W and H swapped.
+  case "$prof" in
+    phone209) w=1080; h=2400; d=420 ;;   # a 20:9 phone
+    small)    w=480;  h=800;  d=240 ;;   # a small phone (5:3)
+    tablet43) w=1536; h=2048; d=320 ;;   # a 4:3 tablet
+    fold)     w=1840; h=2208; d=420 ;;   # the inner screen of a foldable (6:5). The smoke test also resizes it
+    *) echo "unknown profile $prof" >&2; exit 2 ;;
+  esac
+  abi=${img##*/}; tag=$(basename "$(dirname "$img")")
+  d_avd="work/avd/$name.avd"; mkdir -p "$d_avd"
+  printf 'avd.ini.encoding=UTF-8\npath=%s\npath.rel=avd/%s.avd\ntarget=%s\n' \
+    "$(cygpath -w "$E/$d_avd")" "$name" "${img%%/*}" >"work/avd/$name.ini"
+  cat >"$d_avd/config.ini" <<EOF
+AvdId=$name
+avd.ini.displayname=$name
+abi.type=$abi
+hw.cpu.arch=$abi
+hw.cpu.ncore=${AREL_AVD_CORES:-4}
+image.sysdir.1=system-images/$img/
+tag.id=$tag
+tag.display=$tag
+hw.lcd.width=$w
+hw.lcd.height=$h
+hw.lcd.density=$d
+hw.ramSize=${AREL_AVD_RAM:-2048}
+vm.heapSize=256
+disk.dataPartition.size=3G
+hw.gpu.enabled=yes
+hw.gpu.mode=host
+hw.keyboard=yes
+hw.mainKeys=no
+hw.audioOutput=yes
+hw.sensors.orientation=yes
+showDeviceFrame=no
+fastboot.forceColdBoot=yes
+EOF
+  echo "$name $img $prof ${w}x${h} ${d}dpi" >"$d_avd/arel-profile.txt"
+  echo "created $name ($img, $prof)"
+  ;;
+start)
+  name=${1:?NAME}; port=${2:-5554}; serial=emulator-$port
+  [ -f "work/avd/$name.avd/config.ini" ] || { echo "no AVD $name" >&2; exit 1; }
+  mkdir -p logs/avd
+  # -no-snapshot: a cold boot each time, so one run cannot leak into the next.
+  # -memory and -cores: guest RAM in MB (default 2048, was 3072) and vCPUs. Less RAM keeps the PC usable.
+  "$EMU" -avd "$name" -port "$port" -no-window -no-snapshot -no-boot-anim -gpu "${AREL_GPU:-host}" \
+    -memory "${AREL_AVD_RAM:-2048}" -cores "${AREL_AVD_CORES:-4}" -no-audio >"logs/avd/$name.txt" 2>&1 </dev/null &
+  for i in $(seq 1 120); do
+    b=$(timeout -k 5 60 adb -s "$serial" shell getprop sys.boot_completed 2>/dev/null </dev/null | tr -d '\r' || true)
+    [ "$b" = 1 ] && break
+    sleep 5
+  done
+  [ "${b:-}" = 1 ] || { echo "$name did not boot in 600 s (see emu/logs/avd/$name.txt)" >&2; exit 1; }
+  # No screen lock and no screen off on the AVD (the AVD only, never the owner's phone).
+  timeout -k 5 60 adb -s "$serial" shell settings put system screen_off_timeout 2147483647 </dev/null || true
+  timeout -k 5 60 adb -s "$serial" shell svc power stayon true </dev/null || true
+  timeout -k 5 60 adb -s "$serial" shell input keyevent 82 </dev/null || true
+  # Stock Android shows the "Viewing full screen" hint (ImmersiveModeConfirmation) the first time an app
+  # hides the bars. It takes the focus until a tap closes it. Mark it as seen (AVD only, E6).
+  timeout -k 5 60 adb -s "$serial" shell settings put secure immersive_mode_confirmations confirmed </dev/null || true
+  # After a cold boot the launcher can show "Application Not Responding" for a while. Wait until the
+  # focus is a normal window, and close system dialogs (max 90 s).
+  sleep 15
+  for i in $(seq 1 18); do
+    f=$(timeout -k 5 60 adb -s "$serial" shell dumpsys window </dev/null 2>/dev/null | tr -d '\r' | grep mCurrentFocus | head -1 || true)
+    case "$f" in
+      *"Not Responding"*|*"isn't responding"*|*ImmersiveModeConfirmation*|*null*|"")
+        timeout -k 5 60 adb -s "$serial" shell am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS </dev/null >/dev/null 2>&1 || true
+        timeout -k 5 60 adb -s "$serial" shell input keyevent HOME </dev/null || true
+        sleep 5 ;;
+      *) break ;;
+    esac
+  done
+  echo "focus after boot: ${f:-none}" >>"logs/avd/$name.txt"
+  echo "$serial"
+  ;;
+stop)
+  serial=${1:?SERIAL}
+  case "$serial" in emulator-*) ;; *) echo "only an emulator serial" >&2; exit 2 ;; esac
+  timeout -k 5 30 adb -s "$serial" emu kill </dev/null >/dev/null 2>&1 || true
+  for i in $(seq 1 30); do timeout 20 adb devices | grep -q "^$serial" || exit 0; sleep 2; done
+  # A frozen AVD can ignore "emu kill". Stop the emulator processes of this port (Windows process tree).
+  port=${serial#emulator-}
+  echo "emu kill did not stop $serial: taskkill of the processes with -port $port" >&2
+  powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { (\$_.Name -like 'emulator*' -or \$_.Name -like 'qemu-system*') -and \$_.CommandLine -match '-port\s+$port(\s|\$)' } | ForEach-Object { taskkill /PID \$_.ProcessId /T /F }" </dev/null || true
+  sleep 5
+  ;;
+list) ls work/avd/*.ini 2>/dev/null | xargs -n1 basename | sed 's/\.ini$//' ;;
+*) echo "usage: emu/scripts/avd create|start|stop|list" >&2; exit 2 ;;
+esac

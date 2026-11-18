@@ -4,7 +4,8 @@
 
 <p align="center">
   <a href="https://github.com/z0orb/arel-wars-1-fan-revival/releases/latest"><img alt="Download APK" src="https://img.shields.io/badge/Download-APK-2ea44f?style=for-the-badge&logo=android&logoColor=white"></a>
-  <img alt="Android 15 tested" src="https://img.shields.io/badge/Android_15-tested-3ddc84?style=for-the-badge&logo=android&logoColor=white">
+  <img alt="Android 5 to 16 tested" src="https://img.shields.io/badge/Android_5_to_16-tested-3ddc84?style=for-the-badge&logo=android&logoColor=white">
+  <img alt="64-bit phones" src="https://img.shields.io/badge/64--bit_phones-yes-3ddc84?style=for-the-badge">
   <img alt="No internet permission" src="https://img.shields.io/badge/network-none-555?style=for-the-badge">
 </p>
 
@@ -20,6 +21,8 @@
 </table>
 
 Arel Wars (Android v1.0.2) stopped working years ago. Its servers are gone, it stops at a network check on every start, and Android 15 refuses to install it at all. This project patches the original APK so it installs and runs on current Android, with every online feature cleanly switched off and saves that survive updates.
+
+**Version 2** also runs on phones with no 32-bit support. On those phones, a small ARM emulator inside the app runs the original game code. See [docs/INSTALL-v2.md](docs/INSTALL-v2.md).
 
 **Download the ready-to-install APK from [Releases](https://github.com/z0orb/arel-wars-1-fan-revival/releases/latest).** The source tree holds the build tooling, patch specs and test gates. It does not contain the game's code or assets.
 
@@ -50,52 +53,81 @@ Arel Wars (Android v1.0.2) stopped working years ago. Its servers are gone, it s
 
 - **The full single-player campaign:** story mode, battles, world map, heroes, units, shop.
 - **No network at all.** The only permission requested is `VIBRATE`. Without `INTERNET`, Android blocks every connection the app could try. No analytics, ads, push messages or device identifiers.
-- **Runs on Android 15** at target SDK 28, with no "built for an older version" warning.
+- **Runs on Android 5.0 to Android 16**, on 32-bit and 64-bit phones. Version 2 targets SDK 35, with no "built for an older version" warning.
 - **Correct picture:** the game's own 3:2 shape with black side bars, instead of stretched 24% wide. Taps line up.
 - **Saves you can keep:** they survive force-stop, relaunch and updates, and a copy is mirrored to a folder you can back up without root.
 - **Cash is earnable offline.** In the original, Cash came from real-money purchases and PvP. Each stage win now also pays **2 Cash per Gold**, so the Cash-only heroes and items are within reach. See [Balance](#balance).
 - **Clear messages where online features used to be.** PvP, mail, rankings, Export and Import show *"This feature is unavailable in the offline version."* Real-money purchases show *"Purchases are unavailable in this offline version."* Nothing freezes, exits, charges or touches your save.
 
-## Status
-
-Tested on a Redmi Note 12, Android 15 (HyperOS 2). Each phase passed an automated gate script, run on the phone.
-
-| Phase | Result |
-|---|---|
-| 0 Tooling | One command rebuilds the APK from the original |
-| 1 Static audit | Startup, saves, network, shop and threads understood |
-| 2 Device baseline | Original's behaviour on Android 15 recorded |
-| 3 Offline | Reaches the title with no network ability, zero traffic on Wi-Fi |
-| 4 Modern target | Installs at target SDK 28 |
-| 5 Stability | Battles run and survive lock, home, exit and relaunch |
-| 6 Offline features and saves | Online menus fail cleanly, saves survive updates, backup and restore work |
-| 7 Release QA | All gates pass on the release build, plus a random-input soak with no crash. **Full playthrough by the owner in progress** |
-
 ## Installing
 
-You need `arelwars-release.apk` from [the latest release](https://github.com/z0orb/arel-wars-1-fan-revival/releases/latest) and an Android phone that can still run **32-bit ARM apps**. The game's native library is 32-bit only. Some recent phones, such as the Pixel 7 and later, have dropped 32-bit support and cannot run it. Testing was on Android 15. Older versions should work, since the APK declares SDK 7 as its minimum, but they are untested.
+Get `arelwars-v2.0.0.apk` from [the latest release](https://github.com/z0orb/arel-wars-1-fan-revival/releases/latest). It needs Android 5.0 or later. It runs on 64-bit phones with no 32-bit support, for example the Pixel 7 and later.
 
 **With a PC (adb):**
 
 ```
-adb install -r arelwars-release.apk
+adb install -r arelwars-v2.0.0.apk
 ```
 
-**Without a PC:** copy the APK to the phone, open it from a file manager, and allow "install unknown apps" when asked. Android may show a review screen for older apps on first launch. Tap Continue.
+**Without a PC:** copy the APK to the phone, open it from a file manager, and allow "Install unknown apps" when Android asks. If Play Protect shows "Unsafe app blocked", tap "More details", then "Install anyway".
 
-To **update**, install the new APK over the old one the same way. **Never uninstall first.**
+In Brazil, Indonesia, Singapore and Thailand, Android blocks apps from unverified developers. There, use adb or the "advanced flow" of Android. [docs/INSTALL-v2.md](docs/INSTALL-v2.md) has each step, the Xiaomi (HyperOS) items and the save import.
+
+Version 2 has its own package (`io.github.z0orb.arelwars`). It installs next to v1 and does not touch the v1 save. To update v2, install the new APK over the old one. **Never uninstall first.**
+
+The v1 APK (`arelwars-release.apk`, release v1.0.0) is still available. It needs a phone that runs 32-bit ARM apps.
 
 ## Keeping your save
 
 > [!WARNING]
 > **Uninstalling the game, or "Clear data" in Android settings, deletes your save.** Always update by installing over the top.
 
-- Updates only install over each other when they are signed with the same key. Check the certificate against [VERIFY.md](VERIFY.md). A build signed by anyone else, including the original Gamevil APK, can only be installed by uninstalling first, and that deletes your save.
-- The game copies its save about a second after every save, and whenever you leave the game, to:
+- **From v1 to v2:** copy the v1 save folder to a normal folder, then open "Arel Wars Save Import" and pick that folder. The import checks each file first. Keep v1 until your save works in v2. [docs/INSTALL-v2.md](docs/INSTALL-v2.md#move-your-save-from-v1) has the steps.
+- The game copies its save about a second after every save, and whenever you leave the game. v2 copies it to:
   ```
-  /sdcard/Android/data/com.gamevil.eruelwars.global/files/saves/
+  /sdcard/Android/data/io.github.z0orb.arelwars/files/saves/
   ```
-  Copy that whole folder somewhere safe now and then, over USB or with `adb pull`. The files (`Save0.dat`, `Sng0.dat`, `option.sav`) only work as a set, so always keep them together.
+  v1 copies it to `/sdcard/Android/data/com.gamevil.eruelwars.global/files/saves/`. Copy that whole folder somewhere safe now and then, over USB or with `adb pull`. The files (`Save0.dat`, `Sng0.dat`, `option.sav`) only work as a set, so always keep them together.
+- Updates only install over each other when the same key signs them. Check the certificate against [`VERIFY.md`](VERIFY.md).
+
+## Compatibility
+
+Version 2 passed the automated smoke test on each device below: install, start, title, world map, a battle, lock and unlock, and the save. The emulator rows are Android Emulator images (AOSP `default` unless the row says another image).
+
+| Device | ABI | Result |
+|---|---|---|
+| Redmi Note 12, Android 15, HyperOS 2 | `arm64-v8a` (emulator) | Pass |
+| Redmi Note 12, `adb install --abi armeabi-v7a` | `armeabi-v7a` (no emulator) | Pass |
+| Emulator, Android 5.0 (API 21), phone, resize | `x86_64` | Pass, with no lock test (the emulator image freezes at a lock, also with no app) |
+| Emulator, Android 6.0 (API 23), phone | `x86_64` | Pass |
+| Emulator, Android 8.0 (API 26), phone | `x86_64` | Pass |
+| Emulator, Android 9 (API 28), phone | `x86_64` | Pass |
+| Emulator, Android 11 (API 30), phone | `x86_64` | Pass |
+| Emulator, Android 13 (API 33), phone | `x86_64` | Pass |
+| Emulator, Android 14 (API 34), phone | `x86_64` | Pass |
+| Emulator, Android 15 (API 35), phone, resize | `x86_64` | Pass |
+| Emulator, Android 16 (API 36), phone | `x86_64` | Pass |
+| Emulator, Android 15, 16 KB memory pages | `x86_64` | Pass |
+| Emulator, Android 11, 32-bit `x86` with ARM translation | `armeabi-v7a` | Pass |
+| Emulator, Android 15, small phone, resize | `x86_64` | Pass |
+| Emulator, Android 15, tablet, resize and multi-window | `x86_64` | Pass |
+| Emulator, Android 15, foldable, resize | `x86_64` | Pass |
+| 32-bit `x86` with no ARM translation | none | Does not install (`INSTALL_FAILED_NO_MATCHING_ABIS`) |
+
+Speed on the Redmi Note 12, in the largest battle of the test: 21.2 frames each second with the emulator and with no emulator. The original game runs at about 21.3.
+
+## Status
+
+| Phase | Result |
+|---|---|
+| v1 phases 0 to 7 | Offline build at target SDK 28 for 32-bit phones (release v1.0.0) |
+| v2 E0 | The emulator runs the game code on a 64-bit phone |
+| v2 E1 to E3 | The bridge reaches the title, then full play, sound, input and saves |
+| v2 E4 | Native ports of the drawing functions, pixel-exact against the original |
+| v2 E5 | Target SDK 35, lock, back, offline and soak tests on the phone |
+| v2 E6 | Compatibility matrix (table above) |
+| v2 E7 | Speed bench: full speed in the largest battle |
+| v2 E8 | Release v2.0.0 |
 
 ## Not included
 
@@ -103,8 +135,7 @@ To **update**, install the new APK over the old one the same way. **Never uninst
 
 - **Online play of any kind:** PvP, revenge matches, mail, rankings, cloud Export and Import. By design.
 - **Real-money purchases.** Cash comes from stage wins instead.
-- Tested on **one phone** only. Other devices and Android versions may differ. Phones without 32-bit app support cannot run it.
-- The navigation bar stays visible in the right-hand black bar.
+- Tested on **one real phone** and on Android emulators. Other phones can differ. Please report a phone that does not work.
 
 <br clear="right">
 
@@ -126,6 +157,8 @@ A full Normal playthrough pays about 87,000 Cash. Normal plus Hard pays about 24
 Because step 1 depends on unpublished patches, this repository alone does not rebuild the APK. It documents and verifies every change.
 
 `scripts/gates/gate-N` holds the checks each phase had to pass. [CHANGES.md](CHANGES.md) lists every change to the game and why, in plain language. [CHANGELOG.md](CHANGELOG.md) lists changes per release.
+
+**Version 2** has its build in `emu/`. `emu/scripts/build` does the v1 steps, then it adds the bridge library for `arm64-v8a` and `x86_64`, and the original library for `armeabi-v7a`. The bridge source is in `emu/bridge/src/`. The app Java code is in `emu/shell/src/`. The test gates are in `emu/scripts/gates/`. The build gets the emulator source (dynarmic and its parts) as archives, and checks each archive by SHA-256 (`emu/third_party/archives.sha256`). `emu/docs/NOTICE.md` has their licenses. As for v1, the smali patches are not published, so this repository alone does not rebuild the APK.
 
 ## Not affiliated
 

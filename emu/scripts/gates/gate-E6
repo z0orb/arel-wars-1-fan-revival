@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# Phase E6 exit gate (PLAN.md 10, Phase E6): the compatibility matrix.
+# Usage: emu/scripts/gates/gate-E6
+# The gate does not build, install or start an AVD. It reads the newest passing evidence of
+# scripts/gates/smoke (one run for each image, profile and ABI mode) for the builds in dist/ now, and the
+# evidence of the x86_64 runner run (logs/e6-runner-x86_64-*). See HANDOFF.md for the run commands.
+source "$(dirname "$0")/../env.sh"
+source scripts/gates/lib.sh
+gate_start E6
+P() { node -p "require('./scripts/gates/params.json').$1"; }
+
+# ---- GC-E6.1: CC-1 to CC-8 (CC-5 is in each smoke run).
+common_checks
+artefact_check
+
+# Smoke evidence: logs/gate-smoke-*/ with apks.txt (line 1: "args VARIANT ABI profile=.. resize=.. multi=.. flags=..")
+# and device.txt (sdk, abilist, page_size, native_bridge, memory mode). It counts only for the builds in
+# dist/ now, and only if its output ends in PASS.
+good_smoke() {
+  local d
+  for d in $(ls -1d logs/gate-smoke-2* 2>/dev/null | sort -r); do
+    [ -f "$d/apks.txt" ] && [ -f "$d/device.txt" ] || continue
+    grep -qx "debug $(sha dist/arelemu-debug.apk)" "$d/apks.txt" || continue
+    grep -qx "release $(sha dist/arelemu-release.apk)" "$d/apks.txt" || continue
+    tail -3 "$d/output.txt" | grep -qx "GATE-smoke PASS" || continue
+    # A run with no lock cycle (smoke --no-lock) counts only for API 21, and only with the owner's waiver
+    # (E6 session 5: WAKEUP after SLEEP freezes the API 21 AVD, also with no app of ours installed).
+    if sed -n 1p "$d/apks.txt" | grep -q ' lock=0'; then
+      grep -qx 'sdk 21' "$d/device.txt" || continue
+      grep -q '^- \*\*Waiver GC-E6.2 API 21 lock cycle (owner, 2026-11-17)' docs/DEVICES.md || continue
+    fi
+    echo "$d"
+  done
+}
+good_smoke >"$EV/smoke-evidence.txt"
+echo "passing smoke runs for these builds: $(wc -l <"$EV/smoke-evidence.txt")"
+# sel ARGS-REGEX DEVICE-REGEX...: the newest passing run whose apks.txt line 1 and device.txt match.
+sel() {
+  local a=$1 d r; shift
+  while read -r d; do
+    sed -n 1p "$d/apks.txt" | grep -qE "$a" || continue
+    for r in "$@"; do grep -qE "$r" "$d/device.txt" || continue 2; done
+    echo "$d"; return 0
+  done <"$EV/smoke-evidence.txt"
+  return 1
+}
+ev() { local d; d=$(sel "$@") && echo "$* : $d" >>"$EV/matrix-evidence.txt"; }
+
+# ---- GC-E6.2: each x86_64 image, and the owner's phone in both ABI modes.
+for api in 21 23 26 28 30 33 34 35 36; do
+  check "GC-E6.2 smoke passes on API $api x86_64 (primaryCpuAbi x86_64)" ev ' x86_64 ' "^sdk $api\$" '^serial emulator-' '^page_size 4096$'
+done
+check "GC-E6.2 smoke passes on the owner's phone, arm64-v8a" ev ' arm64-v8a ' "^serial $PHONE_SERIAL\$"
+check "GC-E6.2 smoke passes on the owner's phone, armeabi-v7a (adb install --abi)" ev ' armeabi-v7a .*flags=--abi armeabi-v7a' "^serial $PHONE_SERIAL\$"
+
+# ---- GC-E6.3: a 32-bit x86 image with ARM translation runs the armeabi-v7a path.
+check "GC-E6.3 smoke passes on an x86 image with ARM translation (armeabi-v7a)" ev ' armeabi-v7a ' '^serial emulator-' '^abilist x86,' '^native_bridge [^0 ]'
+check "GC-E6.3 docs/DEVICES.md records x86 without translation" grep -q '^## x86 without ARM translation' docs/DEVICES.md
+
+# ---- GC-E6.4: the 16 KB page image.
+check "GC-E6.4 smoke passes on a 16 KB page image" ev ' x86_64 ' '^serial emulator-' '^page_size 16384$'
+
+# ---- GC-E6.5: each 64-bit run names its memory mode, and no run failed to get JIT memory.
+n64=0; nrwx=0
+while read -r d; do
+  sed -n 1p "$d/apks.txt" | grep -qE ' (x86_64|arm64-v8a) ' || continue
+  n64=$((n64 + 1)); grep -qx 'memory mode: RWX' "$d/device.txt" && nrwx=$((nrwx + 1))
+done <"$EV/smoke-evidence.txt"
+check "GC-E6.5 each passing 64-bit smoke run logs memory mode RWX ($nrwx of $n64)" test "$n64" -gt 0 -a "$nrwx" = "$n64"
+grep -l 'RWX denied' logs/gate-smoke-2*/device.txt >"$EV/rwx-denied.txt" 2>/dev/null
+check "GC-E6.5 no smoke run logged RWX denied" test ! -s "$EV/rwx-denied.txt"
+
+# ---- GC-E6.6: the four AVD profiles with the resize item, and multi-window.
+for prof in small phone209 tablet43 fold; do
+  check "GC-E6.6 smoke passes on profile $prof with resize (letterbox, back, resize)" ev " profile=$prof resize=1 " '^serial emulator-'
+done
+check "GC-E6.6 smoke passes with multi-window" ev ' multi=1 ' '^serial emulator-'
+
+# ---- GC-E6.7: the runner on x86_64 gives the p-session hashes of the reference oracle.
+d=$(ls -1d logs/e6-runner-x86_64-2* 2>/dev/null | sort -r | head -1)
+cols() { cut -f1-3 "$1"; }
+check "GC-E6.7 the x86_64 runner p-session has $(P p_session_frames) frames (${d:-none})" test -n "$d" -a "$(wc -l <"${d:-/dev/null}/frames.tsv" 2>/dev/null)" = "$(P p_session_frames)"
+check "GC-E6.7 the x86_64 runner p-session hashes equal the reference oracle" cmp -s <(cols "${d:-/dev/null}/frames.tsv") <(cols work/ref/p-session/frames.tsv)
+check "GC-E6.7 the x86_64 run used an x86_64 device" grep -q '^abilist x86_64' "${d:-/dev/null}/device.txt"
+
+# ---- GC-E6.8: each failure has a fix or an owner-approved waiver.
+check "GC-E6.8 docs/DEVICES.md has the compatibility matrix" grep -q '^## Compatibility matrix' docs/DEVICES.md
+grep -E '^\|.*\| *FAIL *\|' docs/DEVICES.md | grep -v 'waiver' >"$EV/open-failures.txt"
+check "GC-E6.8 no matrix row says FAIL without a waiver" test ! -s "$EV/open-failures.txt"
+check "CC-1 installed v1 APK hash is unchanged at the end" test "$(v1_installed_sha)" = "$V1_APK_SHA"
+gate_end

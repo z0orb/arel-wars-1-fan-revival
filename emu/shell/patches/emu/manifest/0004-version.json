@@ -1,0 +1,4 @@
+[
+  { "op": "set-attr", "tag": "manifest", "attr": "versionCode", "id": "0x0101021b", "type": "int", "value": 200 },
+  { "op": "set-attr", "tag": "manifest", "attr": "versionName", "id": "0x0101021c", "type": "string", "value": "2.0.0" }
+]

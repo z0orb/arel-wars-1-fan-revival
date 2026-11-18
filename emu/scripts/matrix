@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# The AVD part of the compatibility matrix (PLAN.md TASK-E6.4). Runs scripts/gates/smoke on each AVD in turn:
+# create the AVD, cold boot, smoke, stop. One AVD at a time (the PC has about 2 GB of free memory).
+# Usage: emu/scripts/matrix [ENTRY ...]   ENTRY: NAME:IMAGE:PROFILE:ABI[:OPTIONS], OPTIONS split by ','
+#   (default: the list below). Results: one line for each entry in logs/e6/matrix-<ts>.txt.
+# Never touches the phone: each smoke run gets AREL_SERIAL=emulator-PORT.
+source "$(dirname "$0")/env.sh"
+set +e
+default=(
+  a21:android-21/default/x86_64:phone209:x86_64:--resize
+  a23:android-23/default/x86_64:phone209:x86_64
+  a26:android-26/default/x86_64:phone209:x86_64
+  a28:android-28/default/x86_64:phone209:x86_64
+  a30:android-30/default/x86_64:phone209:x86_64
+  a33:android-33/default/x86_64:phone209:x86_64
+  a34:android-34/default/x86_64:phone209:x86_64
+  a35:android-35/default/x86_64:phone209:x86_64:--resize
+  a36:android-36/default/x86_64:phone209:x86_64
+  p16k:android-35/google_apis_ps16k/x86_64:phone209:x86_64
+  x86t:android-30/google_apis/x86:phone209:armeabi-v7a
+  small:android-35/default/x86_64:small:x86_64:--resize
+  tab43:android-35/default/x86_64:tablet43:x86_64:--resize,--multiwindow
+  fold:android-35/default/x86_64:fold:x86_64:--resize
+)
+entries=("$@"); [ ${#entries[@]} -gt 0 ] || entries=("${default[@]}")
+mkdir -p logs/e6
+out=logs/e6/matrix-$(date +%Y%m%d-%H%M%S).txt
+port=5554
+for e in "${entries[@]}"; do
+  IFS=: read -r name img prof abi opts <<<"$e"
+  echo "$(date +%T) $name $img $prof $abi ${opts:-}"
+  bash scripts/avd create "$name" "$img" "$prof" >/dev/null || { echo "$name: create FAIL" >>"$out"; continue; }
+  serial=$(bash scripts/avd start "$name" $port) || { echo "$name: boot FAIL" >>"$out"; bash scripts/avd stop emulator-$port; continue; }
+  log=logs/e6/smoke-$name.txt
+  # A frozen AVD can stop a row for hours (E6 session 2). Each row gets AREL_ROW_TIMEOUT seconds (default 1500).
+  AREL_SERIAL=$serial AREL_PROFILE=$prof timeout -k 30 "${AREL_ROW_TIMEOUT:-1500}" \
+    bash scripts/gates/smoke debug "$abi" ${opts//,/ } >"$log" 2>&1
+  rc=$?
+  [ $rc -eq 124 ] || [ $rc -eq 137 ] && echo "ROW TIMEOUT after ${AREL_ROW_TIMEOUT:-1500} s (exit $rc)" >>"$log"
+  r=$(grep -a -E 'GATE-smoke|evidence:|ROW TIMEOUT' "$log" | tr '\n' ' ')
+  echo "$name $img $prof $abi ${opts:-}: $r" | tee -a "$out"
+  bash scripts/avd stop "$serial"
+  # One AVD folder can grow to 13 GB. Delete it after the run (avd create makes it again).
+  rm -rf "work/avd/$name.avd" "work/avd/$name.ini"
+done
+echo "matrix done: $out"

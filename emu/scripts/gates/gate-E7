@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# Phase E7 exit gate (PLAN.md 10, Phase E7): the performance bench.
+# Usage: emu/scripts/gates/gate-E7
+# The gate does not build, install or run the bench. It reads:
+#   - the newest bench evidence (logs/bench-*, scripts/bench) of the release build in dist/ now, on the
+#     phone ($PHONE_SERIAL), installed as arm64-v8a, with e7_runs runs (GC-E7.1, GC-E7.2)
+#   - docs/PERF.md (GC-E7.3)
+#   - the newest passing gate-E4 evidence that is newer than every file of the bridge, the runner and the
+#     vector tools (GC-E7.4)
+source "$(dirname "$0")/../env.sh"
+source scripts/gates/lib.sh
+gate_start E7
+P() { node -p "require('./scripts/gates/params.json').$1"; }
+at_most() { node -e "process.exit(Number(process.argv[1]) <= Number(process.argv[2]) ? 0 : 1)" "$1" "$2"; }
+at_least() { node -e "process.exit(Number(process.argv[1]) >= Number(process.argv[2]) ? 0 : 1)" "$1" "$2"; }
+
+# ---- GC-E7.5: CC-1 to CC-8 (CC-5 and CC-8 come from the gate-E4 evidence of GC-E7.4).
+common_checks
+artefact_check
+
+# Bench evidence for the release build in dist/ now. ABI: the "installed release, abi X" line.
+bench_for() { # $1 = abi. Prints the newest matching evidence folder.
+  local d
+  for d in $(ls -1d logs/bench-2* 2>/dev/null | sort -r); do
+    [ -f "$d/device.txt" ] && [ -f "$d/summary.txt" ] || continue
+    grep -qx "release $(sha dist/arelemu-release.apk)" "$d/device.txt" || continue
+    grep -q "^variant release " "$d/device.txt" || continue
+    grep -qx "serial $PHONE_SERIAL" "$d/device.txt" || continue
+    grep -qx "installed release, abi $1" "$d/device.txt" || continue
+    echo "$d"; return 0
+  done
+  return 1
+}
+B=$(bench_for arm64-v8a)
+check "GC-E7.1 bench evidence of the release build in dist/, phone, arm64-v8a (${B:-none})" test -n "$B"
+if [ -n "$B" ]; then
+  # Only the JSON line ("median {...}"), not the text line "median of 3: ...".
+  med=$(sed -n 's/^median \({.*}\)$/\1/p' "$B/summary.txt" | tail -1)
+  check "GC-E7.1 the summary has the median line" test -n "$med"
+  # A value that is not a finite number prints NaN, so each compare below fails (Number("") is 0).
+  J() { node -p "const v = (${med:-{\}}).$1; Number.isFinite(v) ? v : NaN"; }
+  runs=$(J runs); fps=$(J fps); p95=$(J p95); logic=$(J logic); bsec=$(J battleSec)
+  check "GC-E7.1 $runs runs (need $(P e7_runs))" test "$runs" = "$(P e7_runs)"
+  check "GC-E7.1 each run has a battle part of at least $(P e7_min_battle_sec) s (shortest $bsec)" at_least "$bsec" "$(P e7_min_battle_sec)"
+  check "GC-E7.1 median average fps $fps >= $(P e7_min_fps)" at_least "$fps" "$(P e7_min_fps)"
+  check "GC-E7.1 median p95 frame interval $p95 ms <= $(P e7_max_p95_ms) ms" at_most "$p95" "$(P e7_max_p95_ms)"
+  lo=$(P 'e7_real_sec_range[0]'); hi=$(P 'e7_real_sec_range[1]')
+  check "GC-E7.2 22 game seconds take $logic real seconds (need $lo to $hi)" bash -c "node -e 'process.exit($logic >= $lo && $logic <= $hi ? 0 : 1)'"
+  cp "$B/summary.txt" "$EV/bench-arm64-summary.txt"
+fi
+
+# ---- GC-E7.3: PERF.md has the numbers of TASK-E7.2 and TASK-E7.3, each with its device.
+V=$(bench_for armeabi-v7a)
+check "GC-E7.3 bench evidence of the release build in dist/, phone, armeabi-v7a (${V:-none})" test -n "$V"
+check "GC-E7.3 docs/PERF.md has the E7 section" grep -q '^## E7 bench' docs/PERF.md
+for d in "$B" "$V"; do
+  [ -n "$d" ] && check "GC-E7.3 docs/PERF.md cites $d" grep -qF "$d" docs/PERF.md
+done
+check "GC-E7.3 docs/PERF.md has a row for the phone, arm64-v8a" grep -qE '^\| Redmi Note 12 .*arm64-v8a' docs/PERF.md
+check "GC-E7.3 docs/PERF.md has a row for the phone, armeabi-v7a" grep -qE '^\| Redmi Note 12 .*armeabi-v7a' docs/PERF.md
+check "GC-E7.3 docs/PERF.md has a row for the slowest AVD profile" grep -qE '^\| AVD ' docs/PERF.md
+A=$(sed -n 's/^.*AVD bench evidence: `\(logs\/bench-[0-9-]*\)`.*$/\1/p' docs/PERF.md | head -1)
+check "GC-E7.3 the AVD bench evidence ${A:-none} exists and has a summary" test -n "$A" -a -s "$A/summary.txt"
+[ -n "$A" ] && check "GC-E7.3 the AVD bench ran on an emulator serial" grep -q '^serial emulator-' "$A/device.txt"
+
+# ---- GC-E7.4: the E4 checks pass on the sources now.
+newest_src=$(find bridge runner scripts/vec-proof scripts/vec-mutate scripts/parity-native scripts/parity work/vec -type f -newermt '1970-01-01' -printf '%T@\n' 2>/dev/null | sort -n | tail -1)
+E4=""
+for d in $(ls -1d logs/gate-E4-2* 2>/dev/null | sort -r); do
+  tail -3 "$d/output.txt" | grep -qx "GATE-E4 PASS" || continue
+  t=$(stat -c %Y "$d/output.txt")
+  node -e "process.exit($t > ${newest_src:-0} ? 0 : 1)" && E4=$d
+  break
+done
+check "GC-E7.4 the newest passing gate-E4 run is newer than the bridge, runner and vector sources (${E4:-none})" test -n "$E4"
+
+gate_end

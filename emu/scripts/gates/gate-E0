@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# Phase E0 exit gate (PLAN.md 10, Phase E0): go/no-go on 64-bit on the owner's phone.
+# Usage: emu/scripts/gates/gate-E0
+source "$(dirname "$0")/../env.sh"
+source scripts/gates/lib.sh
+gate_start E0
+P() { node -p "require('./scripts/gates/params.json').$1"; }
+cols() { cut -f1-3 "$1"; }
+
+# GC-E0.1: CC-1 to CC-6. CC-5 (installed emu APK) has no emu APK in E0. Its logcat part applies to the probe run (GC-E0.4).
+common_checks
+phone_up || { fail "phone $SERIAL connected"; gate_end; }
+
+# Build once, then push (the gate uses these builds for every run).
+bash scripts/runner setup >"$EV/runner-setup.txt" 2>&1
+check "runner builds and pushes" grep -q 'runner setup done' "$EV/runner-setup.txt"
+bash scripts/ref-oracle setup >"$EV/ref-setup.txt" 2>&1
+check "reference oracle builds and pushes" grep -q 'ref-oracle setup done' "$EV/ref-setup.txt"
+
+# GC-E0.2: runner gives the reference oracle hashes for all 1,500 frames of p-session, on two runs.
+REF=work/ref/p-session/frames.tsv
+check "work/ref/p-session hashes equal the 8.2 gate run" cmp -s <(cols $REF) <(cols "$(P p_session_ref_8_2)")
+for n in a b; do
+  bash scripts/runner run gE0s$n docs/saves/testsave -- -frames "$(P p_session_frames)" -script scripts/parity/p-session.txt -probe every:10 -quiet-sound >"$EV/session-$n.txt" 2>&1
+  check "GC-E0.2 runner p-session run $n exits 0" grep -q 'exit=0' "$EV/session-$n.txt"
+  cp work/runner/runs/gE0s$n/frames.tsv "$EV/session-$n-frames.tsv"
+  check "GC-E0.2 runner p-session run $n: 1500 frames" test "$(wc -l <"$EV/session-$n-frames.tsv")" = "$(P p_session_frames)"
+  check "GC-E0.2 runner p-session run $n hashes equal the reference" cmp -s <(cols "$EV/session-$n-frames.tsv") <(cols $REF)
+  check "GC-E0.2 runner p-session run $n probes equal the reference" cmp -s work/runner/runs/gE0s$n/probes.jsonl work/ref/p-session/probes.jsonl
+done
+
+# GC-E0.3: p-heavy runs to its end on the reference oracle and the runner, with equal hashes.
+HS=$(P p_heavy_save); HF=$(P p_heavy_frames)
+bash scripts/ref-oracle run gE0hr "$HS" -- -frames "$HF" -script scripts/parity/p-heavy.txt -probe every:10 -quiet-sound >"$EV/heavy-ref.txt" 2>&1
+check "GC-E0.3 reference p-heavy exits 0" grep -q 'exit=0' "$EV/heavy-ref.txt"
+bash scripts/runner run gE0he "$HS" -- -frames "$HF" -script scripts/parity/p-heavy.txt -probe every:10 -quiet-sound >"$EV/heavy-emu.txt" 2>&1
+check "GC-E0.3 runner p-heavy exits 0" grep -q 'exit=0' "$EV/heavy-emu.txt"
+cp work/ref-oracle/runs/gE0hr/frames.tsv "$EV/heavy-ref-frames.tsv"; cp work/runner/runs/gE0he/frames.tsv "$EV/heavy-emu-frames.tsv"
+check "GC-E0.3 reference p-heavy has $HF frames" test "$(wc -l <"$EV/heavy-ref-frames.tsv")" = "$HF"
+check "GC-E0.3 runner p-heavy hashes equal the reference oracle" cmp -s <(cols "$EV/heavy-emu-frames.tsv") <(cols "$EV/heavy-ref-frames.tsv")
+check "GC-E0.3 p-heavy hashes equal work/ref/p-heavy" cmp -s <(cols "$EV/heavy-ref-frames.tsv") <(cols work/ref/p-heavy/frames.tsv)
+check "GC-E0.3 runner p-heavy probes equal the reference oracle" cmp -s work/runner/runs/gE0he/probes.jsonl work/ref-oracle/runs/gE0hr/probes.jsonl
+node tools/frame-stats.mjs "$(P p_heavy_battle_from)" "$EV/heavy-ref-frames.tsv" "$EV/heavy-emu-frames.tsv" | tee "$EV/heavy-stats.txt"
+
+# GC-E0.4: the probe ran p-heavy as untrusted_app with the runner hashes, and logged the memory mode.
+PE=$(P e0_probe_evidence)
+check "GC-E0.4 probe domain is untrusted_app ($PE/ps-Z.txt)" grep -q '^u:r:untrusted_app:' "$PE/ps-Z.txt"
+check "GC-E0.4 probe log names the memory mode" grep -qE 'ArelEmuProbe: memory mode: (RWX|W\^X)$' "$PE/logcat.txt"
+check "GC-E0.4 probe run finished with rc=0" grep -q 'ArelEmuProbe: done rc=0' "$PE/logcat.txt"
+check "GC-E0.4 probe hashes equal the runner" cmp -s <(cols "$PE/frames.tsv") <(cols "$EV/heavy-emu-frames.tsv")
+pid=$(sed -n 's/^u:r:untrusted_app:[^ ]* [^ ]* \([0-9]*\) .*/\1/p' "$PE/ps-Z.txt")
+grep -E "^[0-9-]+ [0-9:.]+ +$pid " "$PE/logcat.txt" | grep -E 'FATAL|ANR|JNI DETECTED|dlopen failed|RUNNER (FATAL|CRASH)' >"$EV/probe-bad-lines.txt"
+check "GC-E0.4 (CC-5 logcat part) no FATAL, ANR, JNI DETECTED, dlopen failed or crash report from the probe pid $pid" test ! -s "$EV/probe-bad-lines.txt"
+node tools/frame-stats.mjs "$(P p_heavy_battle_from)" "$PE/frames.tsv" | tee "$EV/probe-stats.txt"
+
+# GC-E0.5: E0-RESULT.md holds GO or GO WITH REPLACEMENTS, and the probe numbers meet the GO limits.
+if [ -f docs/E0-RESULT.md ]; then
+  d=$(sed -n 's/^Decision: *//p' docs/E0-RESULT.md | head -1)
+  echo "decision: $d"
+  check "GC-E0.5 decision is GO or GO WITH REPLACEMENTS" bash -c "[ '$d' = GO ] || [ '$d' = 'GO WITH REPLACEMENTS' ]"
+  mean=$(sed -n 's/.*mean \([0-9.]*\).*/\1/p' "$EV/probe-stats.txt"); p95=$(sed -n 's/.*p95 \([0-9.]*\).*/\1/p' "$EV/probe-stats.txt")
+  if [ "$d" = GO ]; then
+    check "GC-E0.5 GO limits: probe mean $mean <= $(P go_mean_ms) ms and p95 $p95 <= $(P go_p95_ms) ms" \
+      node -e "process.exit($mean <= $(P go_mean_ms) && $p95 <= $(P go_p95_ms) ? 0 : 1)"
+  fi
+else
+  todo "GC-E0.5 docs/E0-RESULT.md (TASK-E0.9)"
+fi
+
+# GC-E0.6: probe not installed; v1 APK hash (CC-1) and save mirror hashes unchanged.
+check "GC-E0.6 probe $PROBE_PKG is not installed" bash -c "! adb -s $SERIAL shell pm list packages | tr -d '\r' | grep -qx 'package:$PROBE_PKG'"
+v1_mirror_listing >"$EV/v1-mirror.txt"
+check "GC-E0.6 v1 save mirror hashes equal docs/v1-mirror-baseline.txt" cmp -s docs/v1-mirror-baseline.txt "$EV/v1-mirror.txt"
+check "GC-E0.6 installed v1 APK hash unchanged after the device work" test "$(v1_installed_sha)" = "$V1_APK_SHA"
+
+# GC-E0.7: TOOLS.md has a SHA-256 for each download row.
+node tools/tools-check.mjs docs/TOOLS.md >"$EV/tools-check.txt" 2>&1
+cat "$EV/tools-check.txt"
+check "GC-E0.7 every download in docs/TOOLS.md has a SHA-256" grep -q '^tools-check ok' "$EV/tools-check.txt"
+check "GC-E0.7 the pinned archives match third_party/archives.sha256" bash -c 'cd third_party/archives && sha256sum -c --quiet ../archives.sha256'
+
+gate_end

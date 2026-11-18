@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# Monkey soak on release (PLAN.md TASK-E5.5, GC-E5.9): a port of v1 scripts/gates/soak for the dev package.
+# Usage: emu/scripts/gates/soak [EVENTS]   (default: params e5_soak_events)
+# It plays on the test save. It backs up the saves of the dev package first and puts them back at the end.
+# monkey runs detached on the phone, so an adb drop does not stop it. This script polls until it ends.
+# Logcat at W and higher goes to a file (the ring buffer cannot hold a long run). The dropbox crash records
+# of the dev package are compared before and after: a check that survives lost log lines.
+source "$(dirname "$0")/../env.sh"
+source scripts/gates/lib.sh
+source scripts/gates/devlib.sh
+dev_start soak "$@"
+events=${1:-$(P e5_soak_events)}
+MON=$PHONE_DIR/monkey.txt
+phone_up || { fail "phone $SERIAL connected"; gate_end; }
+v1_before=$(v1_installed_sha)
+dropbox_count() {
+  local n=0 t
+  for t in data_app_crash data_app_native_crash data_app_anr; do
+    n=$((n + $(adbs shell dumpsys dropbox --print "$t" </dev/null 2>/dev/null | tr -d '\r' | grep -c "Process: $DEV_PKG" || true)))
+  done
+  echo "$n"
+}
+restore_bar() { adbs shell cmd statusbar send-disable-flag none </dev/null >/dev/null 2>&1; }
+swap_in_test_save || gate_end
+testsave_for release && pass "release installed, test save in place" || fail "release installed, test save in place"
+# The 3-button navigation bar and the shade are inside the touch area of monkey. Block home, recents and the
+# shade, so monkey cannot get to quick settings (Wi-Fi, data, airplane mode). The trap sets them back.
+trap restore_bar EXIT
+adbs shell cmd statusbar send-disable-flag home recents statusbar-expansion </dev/null && pass "status bar expansion, home and recents blocked" || fail "status bar flags set"
+before=$(dropbox_count); echo "dropbox crash and ANR records of $DEV_PKG before: $before"
+launch
+adbs logcat -c </dev/null
+UID_=$(bash scripts/app uid)
+# Two streams: the whole phone at W and higher as evidence, and each line of our app UID, which the crash
+# check reads. Other apps start in the background during a long soak and log their own failures.
+( while :; do adbs logcat -v threadtime '*:W' </dev/null >>"$EV/logcat-soak.txt" 2>/dev/null; sleep 5; done ) &
+LOGPID=$!
+( while :; do adbs logcat -v threadtime --uid="$UID_" </dev/null >>"$EV/logcat-soak-app.txt" 2>/dev/null; sleep 5; done ) &
+APPLOGPID=$!
+adbs shell mkdir -p $PHONE_DIR </dev/null
+adbs shell rm -f "$MON" </dev/null
+adbs shell "nohup monkey -p $DEV_PKG --pct-syskeys 0 --throttle 200 -v $events >$MON 2>&1 </dev/null &" </dev/null
+sleep 10
+start=$(date +%s)
+# 200 ms for each event, and a margin. A monkey that hangs ends the wait.
+limit=$(( events / 5 + 1800 ))
+while :; do
+  if adbs get-state 2>/dev/null | grep -q device; then
+    adbs shell pidof com.android.commands.monkey </dev/null >/dev/null 2>&1 || break
+  else
+    echo "$(date +%T) adb not connected, waiting"
+  fi
+  [ $(( $(date +%s) - start )) -gt "$limit" ] && { echo "monkey still runs after ${limit}s"; break; }
+  sleep 30
+done
+adbs pull "$MON" "$EV/monkey.txt" </dev/null >/dev/null 2>&1
+restore_bar && pass "status bar flags set back"
+kill "$LOGPID" "$APPLOGPID" 2>/dev/null; sleep 1; pkill -P "$LOGPID" 2>/dev/null; pkill -P "$APPLOGPID" 2>/dev/null
+adbs logcat -d </dev/null >"$EV/logcat-soak-tail.txt"
+adbs logcat -d --uid="$UID_" </dev/null >"$EV/logcat-soak-app-tail.txt"
+check "the app log stream is captured (uid $UID_)" test -n "$UID_" -a -s "$EV/logcat-soak-app.txt"
+after=$(dropbox_count); echo "dropbox crash and ANR records of $DEV_PKG after: $after"
+check "no new crash or ANR records of $DEV_PKG in dropbox ($before to $after)" test "$after" = "$before"
+cat "$EV/logcat-soak-app.txt" "$EV/logcat-soak-app-tail.txt" | tr -d '\r' | grep -E "$(P e1_logcat_bad_regex)" | grep -Ev "$(P e5_logcat_ignore_regex)" >"$EV/logcat-soak-hits.txt"
+check "the soak logcat has no crash line (logcat-soak-hits.txt)" test ! -s "$EV/logcat-soak-hits.txt"
+check "monkey saw no crash or ANR" bash -c "! grep -Eq '// (CRASH|NOT RESPONDING)' '$EV/monkey.txt'"
+check "monkey finished all $events events" bash -c "grep -q 'Events injected: $events' '$EV/monkey.txt' && grep -q '// Monkey finished' '$EV/monkey.txt'"
+# The Exit of the game closes the process, and monkey can stop on the home screen after one. Start again,
+# so the device checks look at a running game.
+launch
+dev_checks release
+bash scripts/app stop
+put_back_saves release
+check "CC-1 installed v1 APK hash is unchanged ($v1_before)" test "$(v1_installed_sha)" = "$V1_APK_SHA" -a "$v1_before" = "$V1_APK_SHA"
+gate_end

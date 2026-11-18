@@ -1,0 +1,5 @@
+[
+  { "op": "set-package", "value": "io.github.z0orb.arelwars", "qualify": true },
+  { "op": "set-attr", "tag": "application", "attr": "label", "id": "0x01010001", "type": "string", "value": "Arel Wars" },
+  { "op": "set-attr", "tag": "activity", "attr": "label", "id": "0x01010001", "type": "string", "value": "Arel Wars" }
+]

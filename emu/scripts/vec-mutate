@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# Mutation check of the native replacements (PLAN.md DES-12 step 4, TASK-E4.4, GC-E4.2).
+# Each mutation N breaks one rule of bridge/src/native/ (MUT(N), runner build only). The runner then
+# runs the suite that must catch it with all replacements on. The suite must differ from the reference.
+#   emu/scripts/vec-mutate [N...]   default: all. Prints "mutation N (SUITE): caught|NOT CAUGHT". Exit 1 if one is not caught.
+# Needs emu/scripts/runner setup and the references of emu/scripts/vec-proof run ref.
+source "$(dirname "$0")/env.sh"
+# N SUITE: the rule (see the MUT(N) site in bridge/src/native/)
+MUTS="1 leaves1
+2 leaves1
+3 fx
+4 leaves1
+5 alpha
+6 leaves2
+7 enlarge
+8 outline
+9 u16
+10 alpha
+11 screen
+12 screen
+13 screen
+14 fade
+15 fade
+16 fade
+17 wave
+18 wave
+19 screen
+20 leaves1
+21 prim
+22 prim
+23 prim
+24 prim
+25 prim
+26 prim
+27 prim
+28 prim
+29 prim
+30 prim
+31 prim
+32 text
+33 text
+34 text
+35 text"
+# No mutation for the u16 parameter cut in native.cpp: each kernel cuts it to 16 bits again.
+# The derived suite hiparam shows that the original also uses only the low 16 bits.
+want=" ${*:-$(echo "$MUTS" | cut -d' ' -f1 | tr '\n' ' ')} "
+rc=0
+while read -r n s; do
+  case "$want" in *" $n "*) ;; *) continue ;; esac
+  if ! AREL_NATIVE_MUT=$n bash scripts/vec-proof run on "$s" >/dev/null 2>&1; then
+    # A crash of the runner also fails the suite. Check that the run started with the mutation.
+    if grep -q "native: mutation $n$" "work/runner/runs/von-$s/log.txt" 2>/dev/null; then echo "mutation $n ($s): caught (the run stopped: $(grep -m1 -iE 'crash|die|signal|fault' "work/runner/runs/von-$s/log.txt" | cut -c1-80))"
+    else echo "mutation $n ($s): the run failed before the mutation was on"; rc=1; fi
+    continue
+  fi
+  log=work/runner/runs/von-$s/log.txt
+  grep -q "native: mutation $n\$" "$log" || { echo "mutation $n ($s): the runner did not report the mutation"; rc=1; continue; }
+  if cmp -s "work/ref/vec/$s.txt" "work/vec/out/on-$s.txt"; then echo "mutation $n ($s): NOT CAUGHT"; rc=1
+  else echo "mutation $n ($s): caught ($(diff "work/ref/vec/$s.txt" "work/vec/out/on-$s.txt" | grep -c '^<' || true) cases differ)"; fi
+done <<<"$MUTS"
+# Leave the plain outputs in place: rerun nothing here; vec-proof run on rewrites them.
+exit $rc

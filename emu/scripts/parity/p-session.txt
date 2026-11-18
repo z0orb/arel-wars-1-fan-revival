@@ -1,0 +1,14 @@
+# 8.2 gate session: title, Continue, slot 1, world map, Stage 1 battle (v1 macros to_worldmap and to_battle, converted by tools/oracle/macro.mjs; battle starts near frame 890)
+150 tap 245 160
+237 tap 138 177
+282 tap 155 113
+412 tap 430 103
+499 tap 455 264
+607 tap 240 240
+673 tap 453 291
+739 tap 453 291
+805 tap 453 291
+871 tap 453 291
+1086 tap 455 264
+1216 tap 240 190
+# next 1303

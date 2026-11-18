@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Emulator path session start check (PLAN.md 9). Usage: emu/scripts/preflight [--no-phone]
+# Read-only: checks inputs, tools, gate hashes, v1 and universal/ untouched, and the phone state.
+source "$(dirname "$0")/env.sh"
+source scripts/v1check.sh
+bad=0
+ok() { echo "ok    $1"; }
+no() { echo "FAIL  $1"; bad=1; }
+
+[ "$(sha "$ORIGINAL")" = "$ORIGINAL_SHA" ] && ok "original APK hash" || no "original APK hash"
+for t in "$V1_RELEASE_APK" "$DEV_KEY" "$DEV_KEY_PASS" "$NDK/source.properties" docs/V1-BASELINE.txt docs/UNIVERSAL-BASELINE.txt; do
+  [ -e "$t" ] && ok "$t" || no "$t missing"
+done
+for c in java keytool adb node aapt2 zipalign apksigner.bat; do
+  command -v "$c" >/dev/null && ok "tool $c" || no "tool $c missing"
+done
+if (cd scripts/gates && sha256sum -c --quiet SHA256SUMS); then ok "emu gate script hashes"; else no "emu gate script hashes"; fi
+if diff <(grep -v '^#' docs/V1-BASELINE.txt) <(v1_tree) >/dev/null; then ok "v1 tree equals V1-BASELINE.txt"; else no "v1 tree differs from V1-BASELINE.txt"; fi
+if diff <(grep -v '^#' docs/UNIVERSAL-BASELINE.txt) <(universal_tree) >/dev/null; then ok "universal/ tree equals UNIVERSAL-BASELINE.txt"; else no "universal/ tree differs from UNIVERSAL-BASELINE.txt"; fi
+# From E8 (TASK-E8.3), git tracks the public set of emu/ in scripts/public-files.txt. Any other tracked file under
+# emu/, and any tracked file under universal/, is a failure.
+if [ -z "$(cd .. && git ls-files emu universal | LC_ALL=C comm -23 - <(LC_ALL=C sort scripts/public-files.txt))" ]; then ok "under emu/ git tracks only the public set, and nothing under universal/"; else no "git tracks files under emu/ or universal/ that are not in scripts/public-files.txt"; fi
+
+if [ "${1:-}" = --no-phone ]; then
+  echo "SKIP  phone checks (--no-phone)"
+elif phone_up; then
+  ok "phone $SERIAL connected"
+  got=$(v1_installed_sha) && [ "$got" = "$V1_APK_SHA" ] && ok "installed v1 APK hash" || no "installed v1 APK hash ($got)"
+else
+  no "phone $SERIAL not connected"
+fi
+[ $bad = 0 ] && echo "EMU PREFLIGHT PASS" || { echo "EMU PREFLIGHT FAIL"; exit 1; }

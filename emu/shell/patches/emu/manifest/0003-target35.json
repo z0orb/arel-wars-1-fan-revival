@@ -1,0 +1,10 @@
+[
+  { "op": "set-attr", "tag": "uses-sdk", "attr": "minSdkVersion", "id": "0x0101020c", "type": "int", "value": 21 },
+  { "op": "set-attr", "tag": "uses-sdk", "attr": "targetSdkVersion", "id": "0x01010270", "type": "int", "value": 35 },
+  { "op": "set-attr", "tag": "application", "attr": "enableOnBackInvokedCallback", "id": "0x0101066c", "type": "bool", "value": true },
+  { "op": "set-attr", "tag": "application", "attr": "resizeableActivity", "id": "0x010104f6", "type": "bool", "value": true },
+  { "op": "set-attr", "tag": "activity", "attr": "configChanges", "id": "0x0101001f", "type": "hex", "value": "0x1da0" },
+  { "op": "set-attr", "tag": "activity", "name": "@V1PKG@.DRMLicensing", "attr": "exported", "id": "0x01010010", "type": "bool", "value": true },
+  { "op": "set-attr", "tag": "activity", "name": "@V1PKG@.SkeletonLauncher", "attr": "exported", "id": "0x01010010", "type": "bool", "value": false },
+  { "op": "set-attr", "tag": "activity", "name": "com.gamevil.nexus2.ArelImport", "attr": "exported", "id": "0x01010010", "type": "bool", "value": true }
+]

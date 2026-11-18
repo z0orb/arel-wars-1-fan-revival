@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# Phase E1 exit gate (PLAN.md 10, Phase E1): bridge MVP to the title screen.
+# Usage: emu/scripts/gates/gate-E1
+# The gate does not build or install. It checks dist/arelemu-debug.apk as built by emu/scripts/build,
+# and the phone must have that APK installed (emu/scripts/app install: the owner accepts it on the phone).
+source "$(dirname "$0")/../env.sh"
+source scripts/gates/lib.sh
+gate_start E1
+P() { node -p "require('./scripts/gates/params.json').$1"; }
+cols() { cut -f1-3 "$1"; }
+APK=dist/arelemu-debug.apk
+
+# GC-E1.1: CC-1 to CC-6 and CC-8.
+common_checks
+phone_up || { fail "phone $SERIAL connected"; gate_end; }
+bash scripts/runner setup >"$EV/runner-setup.txt" 2>&1
+check "runner builds and pushes" grep -q 'runner setup done' "$EV/runner-setup.txt"
+REF=work/ref/p-session
+bash scripts/runner run gE1s docs/saves/testsave -- -frames "$(P p_session_frames)" -script scripts/parity/p-session.txt -probe every:10 -quiet-sound >"$EV/session.txt" 2>&1
+check "runner p-session exits 0" grep -q 'exit=0' "$EV/session.txt"
+cp work/runner/runs/gE1s/frames.tsv "$EV/session-frames.tsv"; cp work/runner/runs/gE1s/log.txt "$EV/session-log.txt"
+check "CC-8 / GC-E1.2 runner p-session: $(P p_session_frames) frames" test "$(wc -l <"$EV/session-frames.tsv")" = "$(P p_session_frames)"
+check "CC-8 / GC-E1.2 runner p-session hashes equal the reference oracle" cmp -s <(cols "$EV/session-frames.tsv") <(cols $REF/frames.tsv)
+check "GC-E1.2 runner p-session probes equal the reference oracle" cmp -s work/runner/runs/gE1s/probes.jsonl $REF/probes.jsonl
+grep -P '\tprintf ' "$EV/session-log.txt" | cut -f2- >"$EV/printf-runner.txt"
+grep -P '\tprintf ' $REF/log.txt | cut -f2- >"$EV/printf-ref.txt"
+check "GC-E1.2 the printf lines of the runner log equal the reference oracle log ($(wc -l <"$EV/printf-ref.txt") lines)" cmp -s "$EV/printf-runner.txt" "$EV/printf-ref.txt"
+# TASK-E1.2: the list of every format string, and no conversion that fmt.cpp does not handle.
+bash scripts/guest >/dev/null
+node tools/fmt-list.mjs work/guest/libgameDSO.so "$EV/FORMATS.txt" >"$EV/fmt-list.txt" 2>&1
+check "TASK-E1.2 fmt.cpp handles every conversion of the guest format strings" grep -q 'not handled: 0' "$EV/fmt-list.txt"
+check "TASK-E1.2 docs/FORMATS.txt is current" cmp -s "$EV/FORMATS.txt" docs/FORMATS.txt
+
+# GC-E1.5 and TASK-E1.3/E1.4: the APK, its ABIs and the 16 KB alignment.
+check "TASK-E1.3 $APK exists" test -f $APK
+check "$APK hash equals $APK.sha256" test "$(sha $APK)" = "$(cat $APK.sha256 2>/dev/null)"
+# unzip with a name pattern extracts only part of an APK in Git Bash. Extract each entry by name.
+rm -rf "$EV/apk"
+for a in arm64-v8a x86_64 armeabi-v7a; do
+  mkdir -p "$EV/apk/lib/$a"; unzip -p $APK "lib/$a/libgameDSO.so" >"$EV/apk/lib/$a/libgameDSO.so"
+done
+for a in arm64-v8a x86_64; do
+  f="$EV/apk/lib/$a/libgameDSO.so"
+  check "TASK-E1.4 the APK has the bridge for $a" test -f "$f"
+  "$TC/llvm-readelf.exe" -lW "$f" 2>/dev/null | awk '$1 == "LOAD" {print $NF}' >"$EV/palign-$a.txt"
+  check "GC-E1.5 every LOAD segment of lib/$a has p_align 0x4000" bash -c "test -s '$EV/palign-$a.txt' && ! grep -vx 0x4000 '$EV/palign-$a.txt'"
+done
+check "TASK-E1.3 lib/armeabi-v7a holds the guest" test "$(sha "$EV/apk/lib/armeabi-v7a/libgameDSO.so" 2>/dev/null)" = "$(P guest_sha256)"
+check "TASK-E1.3 the APK has no lib/armeabi/" bash -c "! unzip -l $APK | grep -q ' lib/armeabi/'"
+check "GC-E1.5 zipalign -c -P 16 4 passes" zipalign -c -P 16 4 $APK
+aapt2.exe dump badging $APK >"$EV/badging.txt" 2>&1
+check "TASK-E1.3 package is $DEV_PKG" grep -q "^package: name='$DEV_PKG'" "$EV/badging.txt"
+# From E5 the target is 35 (TASK-E5.1). gate-E5 checks it exactly.
+check "TASK-E1.3 target SDK is 28 (E1 to E4) or 35 (from E5)" grep -qE "^targetSdkVersion:'(28|35)'" "$EV/badging.txt"
+
+# CC-5 and GC-E1.3: the installed debug APK on the owner's phone.
+got=$(bash scripts/app installed-sha)
+check "CC-5 the installed $DEV_PKG APK hash equals the build ($got)" test "$got" = "$(sha $APK)"
+adbs shell dumpsys package $DEV_PKG </dev/null | tr -d '\r' >"$EV/dumpsys-package.txt"
+check "GC-E1.3 primaryCpuAbi=arm64-v8a" grep -q 'primaryCpuAbi=arm64-v8a' "$EV/dumpsys-package.txt"
+check "GC-E1.4 the installed build is debuggable (CheckJNI on)" grep -q 'DEBUGGABLE' "$EV/dumpsys-package.txt"
+bash scripts/app stop
+bash scripts/app launch
+sleep "$(P e1_launch_wait_sec)"
+adbs shell dumpsys window </dev/null | tr -d '\r' | grep mCurrentFocus >"$EV/focus.txt"
+check "CC-5 mCurrentFocus is our activity" grep -q "$DEV_PKG" "$EV/focus.txt"
+bash scripts/app shot "$EV/title.png"
+check "GC-E1.3 the title screen is drawn" node tools/screen.mjs not-black "$EV/title.png"
+# The golden: the title frames of the reference oracle (the runner gives the same hashes, CC-8).
+bash scripts/runner run gE1t docs/saves/testsave -- -frames 150 -png "$(P e1_title_ref_frames)" -quiet-sound >"$EV/title-ref.txt" 2>&1
+read -r x0 y0 x1 y1 <<<"$(P e1_game_box)"
+# From E5, ArelInsets logs the box ("box X Y W H ..."). Use it when it is there.
+bl=$(adbs logcat -d -s ArelInsets:I </dev/null | tr -d '\r' | grep ' box ' | tail -1 | sed 's/.* box //')
+[ -n "$bl" ] && read -r x0 y0 bw bh _ <<<"$bl" && x1=$((x0 + bw)) && y1=$((y0 + bh))
+echo "game box $x0 $y0 $x1 $y1" >"$EV/game-box.txt"
+diff=$(node tools/screen.mjs title-match "$EV/title.png" $x0 $y0 $x1 $y1 "$(P e1_title_max_diff)" work/runner/runs/gE1t/png/*.rgb565)
+check "GC-E1.3 the title matches the reference title frames (differ $diff, max $(P e1_title_max_diff))" node tools/screen.mjs title-match "$EV/title.png" $x0 $y0 $x1 $y1 "$(P e1_title_max_diff)" work/runner/runs/gE1t/png/*.rgb565
+bash scripts/app tap $(P e1_title_tap)
+sleep 4
+bash scripts/app shot "$EV/after-tap.png"
+c=$(node tools/screen.mjs pixels-changed "$EV/title.png" "$EV/after-tap.png")
+check "GC-E1.3 a tap on the title changes the screen (changed $c, min $(P e1_title_tap_min_change))" node -e "process.exit($c >= $(P e1_title_tap_min_change) ? 0 : 1)"
+bash scripts/app logcat "$EV/logcat-app.txt"
+check "GC-E1.4 CheckJNI is on in the app process" grep -q 'Late-enabling -Xcheck:jni' "$EV/logcat-app.txt"
+check "the bridge loaded the guest with the right hash" grep -q "SHA-256 $(P guest_sha256)" "$EV/logcat-app.txt"
+grep -E "$(P e1_logcat_bad_regex)" "$EV/logcat-app.txt" >"$EV/logcat-hits.txt"
+check "CC-5 / GC-E1.4 app logcat has no FATAL, ANR, JNI DETECTED, dlopen failed or bridge crash report" test ! -s "$EV/logcat-hits.txt"
+bash scripts/app stop
+
+# v1 did not change during the device work.
+check "installed v1 APK hash unchanged after the device work" test "$(v1_installed_sha)" = "$V1_APK_SHA"
+gate_end

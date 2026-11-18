@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# The emu APK on the phone (PLAN.md TASK-E1.5). Only the dev package io.github.z0orb.arelwars.emudev.
+#   emu/scripts/app install [debug|release]   adb install -r. HyperOS asks the owner to accept it on the phone
+#   emu/scripts/app launch                    start the game launcher activity (game-activity), clear logcat first
+#   emu/scripts/app front                     bring the game back to the front, as the launcher icon does
+#   emu/scripts/app import [AM ARGS]          start ArelImport (the save import, E3)
+#   emu/scripts/app stop                      force-stop the dev package
+#   emu/scripts/app shot FILE.png             a screenshot
+#   emu/scripts/app tap X Y                   one tap in screen pixels
+#   emu/scripts/app pid | uid | logcat FILE   the process, the app UID, the logcat lines of the app UID
+#   emu/scripts/app installed-sha             SHA-256 of the installed base.apk
+source "$(dirname "$0")/env.sh"
+cmd=${1:-}; shift || true
+case "$cmd" in
+install)
+  v=${1:-debug}
+  adbs install -r "dist/arelemu-$v.apk"
+  ;;
+launch|front)
+  # The game launcher, not the save import (ArelImport is a second launcher entry from E3).
+  # The same intent as a tap on the launcher icon, so "front" brings a running game back (as from HOME).
+  c=$(bash scripts/app game-activity)
+  [ -n "$c" ] || { echo "no game launcher activity" >&2; exit 1; }
+  # API 26 AVD: "logcat -c" can fail just after an install ("failed to clear the 'main' log"). With set -e
+  # that stopped the launch (E6 session 3). Try 3 times, then start the app all the same.
+  if [ "$cmd" = launch ]; then
+    for i in 1 2 3; do adbs logcat -c </dev/null && break; sleep 1; done || true
+  fi
+  adbs shell am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -f 0x10200000 -n "$c" </dev/null >/dev/null 2>&1
+  ;;
+game-activity)
+  a=$(adbs shell cmd package query-activities --brief -a android.intent.action.MAIN -c android.intent.category.LAUNCHER $DEV_PKG </dev/null \
+    | tr -d '\r' | grep -E "^ *$DEV_PKG/" | grep -v ArelImport | head -1 | tr -d ' ' || true)
+  # API 21 and 23 have no "cmd": read the LAUNCHER filters from dumpsys package (E6).
+  if [ -z "$a" ]; then
+    a=$(adbs shell dumpsys package $DEV_PKG </dev/null | tr -d '\r' \
+      | awk -v p="$DEV_PKG/" '$2 ~ "^" p { c = $2 } /Category: "android.intent.category.LAUNCHER"/ && c { print c; c = "" }' \
+      | grep -v ArelImport | head -1 || true)
+  fi
+  # API 23 has no "cmd", and its dumpsys package shows no filter categories. Both builds have the same
+  # launcher activities, so read them from the debug APK (aapt2 badging).
+  if [ -z "$a" ]; then
+    a=$(aapt2 dump badging dist/arelemu-debug.apk 2>/dev/null | tr -d '\r' \
+      | sed -n "s/^launchable-activity: name='\([^']*\)'.*/\1/p" | grep -v ArelImport | head -1 || true)
+    [ -z "$a" ] || a="$DEV_PKG/$a"
+  fi
+  echo "$a"
+  ;;
+import)
+  # ArelImport (TASK-E3.4). Extra arguments go to am start, for example --ez staged true.
+  adbs shell am start -n "$DEV_PKG/com.gamevil.nexus2.ArelImport" "$@" </dev/null
+  ;;
+stop) adbs shell am force-stop $DEV_PKG ;;
+shot)
+  # The game window is always landscape. An old image (API 21 AVD) gives a portrait screencap of a
+  # turned display: turn it to landscape (tools/screen.mjs to-landscape). The phone gives landscape.
+  adbs exec-out screencap -p >"$1.raw.png"
+  node tools/screen.mjs to-landscape "$1.raw.png" "$1" && rm -f "$1.raw.png"
+  ;;
+tap) adbs shell input tap "$1" "$2" ;;
+pid)
+  # API 21 has no pidof (E6): then read ps. The name column is last, the PID column is second.
+  # The API 23 toybox pidof gives every PID of the system: use its result only when it is one PID.
+  p=$(adbs shell pidof $DEV_PKG </dev/null 2>/dev/null | tr -d '\r' | grep -E '^ *[0-9]+ *$' | tr -d ' ' || true)
+  [ -n "$p" ] || p=$(adbs shell ps </dev/null | tr -d '\r' | awk -v n="$DEV_PKG" '$NF == n { print $2 }' | head -1)
+  echo "$p"
+  ;;
+uid) adbs shell pm list packages -U $DEV_PKG </dev/null | tr -d '\r' | sed -n 's/.* uid:\([0-9]*\).*/\1/p' | head -1 ;;
+logcat)
+  u=$(bash scripts/app uid)
+  # API 23 has no "pm list packages -U", so the UID can be empty (E6 session 3). Then use only the PID filter.
+  : >"$1"
+  [ -z "$u" ] || { adbs logcat -d --uid="$u" </dev/null 2>/dev/null | tr -d '\r' >"$1" || true; }
+  # API 30 and older give no lines for --uid (E6 session 3). Then keep the lines of each process of the
+  # package (from the "Start proc" lines of ActivityManager) and each line that names the package.
+  if ! grep -qv '^--------- ' "$1"; then
+    adbs logcat -d -v threadtime </dev/null | tr -d '\r' | awk -v pkg="$DEV_PKG" '
+      { line[NR] = $0; p = "" }
+      index($0, "Start proc ") {
+        if (match($0, /Start proc [0-9]+:/)) { s = substr($0, RSTART + 11, RLENGTH - 12); if (index($0, "Start proc " s ":" pkg "/")) p = s }
+        else if (index($0, "Start proc " pkg " ") && match($0, /pid=[0-9]+/)) p = substr($0, RSTART + 4, RLENGTH - 4)
+        if (p != "") pid[p] = 1
+      }
+      END { for (i = 1; i <= NR; i++) { split(line[i], f, / +/); if ((f[3] in pid) || index(line[i], pkg)) print line[i] } }' >"$1"
+    echo "--------- app logcat: PID filter (no --uid lines)" >>"$1"
+  fi
+  ;;
+installed-sha)
+  p=$(adbs shell pm path $DEV_PKG </dev/null | tr -d '\r' | sed -n 's/^package://p' | grep base.apk | head -1)
+  [ -n "$p" ] || { echo none; exit 0; }
+  s=$(adbs shell "sha256sum '$p' 2>/dev/null" </dev/null | tr -d '\r' | cut -d' ' -f1)
+  # API 23 has no sha256sum: pull the APK (an AVD only, about 120 MB) and hash it here (E6).
+  if ! [[ "$s" =~ ^[0-9a-f]{64}$ ]]; then
+    f="work/installed-$SERIAL.apk"
+    adbs pull "$p" "$f" </dev/null >/dev/null 2>&1 && s=$(sha256sum "$f" | cut -d' ' -f1)
+    rm -f "$f"
+  fi
+  echo "${s:-none}"
+  ;;
+*) echo "usage: emu/scripts/app install|launch|front|game-activity|import|stop|shot|tap|pid|uid|logcat|installed-sha" >&2; exit 2 ;;
+esac

@@ -1,0 +1,20 @@
+# p-shop (TASK-E3.2): owner's slot 2 (docs/saves/mirror-20261109). Title, Continue, slot 2,
+# SHOP, ITEMS, buy Healing Grace (S) for 10 Gold (673 to 663), OK, back, the Stage 14 marker,
+# START, forward x4 (the save near frame 1163), quest OK. Run with -frames 1400.
+150 tap 245 160
+237 tap 138 177
+282 tap 240 113
+450 tap 430 55
+520 tap 290 140
+600 tap 57 128
+608 tap 57 128
+660 tap 204 182
+720 tap 240 195
+780 tap 22 295
+860 tap 240 183
+920 tap 430 103
+958 tap 453 291
+1028 tap 453 291
+1094 tap 453 291
+1160 tap 453 291
+1228 tap 240 190

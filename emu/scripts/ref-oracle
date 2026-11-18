@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# Reference oracle (PLAN.md TASK-E0.4): a copy of the 8.2 oracle in emu/ref-oracle, with a guest-time column.
+#   emu/scripts/ref-oracle build                   build work/ref-oracle/arel-oracle (32-bit ARM, static, non-PIE)
+#   emu/scripts/ref-oracle setup                   build, then push binary, guest and original assets
+#   emu/scripts/ref-oracle run NAME [SAVE] -- ARGS run a session; SAVE is a folder of save files (or "none").
+#                                                  A -script path is pushed first. Results: work/ref-oracle/runs/NAME
+# Phone layout: /data/local/tmp/arel-emu/ref/{arel-oracle,libgameDSO.so,runs/NAME/{files,out}} and /data/local/tmp/arel-emu/assets/
+source "$(dirname "$0")/env.sh"
+R=$PHONE_DIR/ref
+cmd=${1:-}; shift || true
+build() {
+  mkdir -p work/ref-oracle
+  "$TC/clang.exe" --target=armv7a-linux-androideabi29 -O2 -g -Wall -Wextra -Wno-unused-parameter \
+    -static -fno-pie -fno-stack-protector \
+    -Wl,--image-base=0x00400000 \
+    -o work/ref-oracle/arel-oracle \
+    ref-oracle/src/main.c ref-oracle/src/loader.c ref-oracle/src/heap.c ref-oracle/src/shims.c ref-oracle/src/jni.c \
+    ref-oracle/src/dump.c ref-oracle/src/vec.c ref-oracle/src/switch.S -lm
+  echo "built work/ref-oracle/arel-oracle $(sha work/ref-oracle/arel-oracle)"
+}
+case "$cmd" in
+build) build ;;
+setup)
+  build >/dev/null
+  SO=$(bash scripts/guest)
+  adbs shell "mkdir -p $R/runs" </dev/null
+  adbs push work/ref-oracle/arel-oracle $R/arel-oracle >/dev/null
+  adbs push "$SO" $R/libgameDSO.so >/dev/null
+  adbs shell chmod 755 $R/arel-oracle </dev/null
+  if [ "$(adbs shell "ls $PHONE_DIR/assets/data_eng 2>/dev/null | wc -l" </dev/null | tr -d '\r ')" -lt 2 ]; then
+    adbs push work/apk/assets $PHONE_DIR/ >/dev/null
+  fi
+  echo "ref-oracle setup done: $(adbs shell "sha256sum $R/arel-oracle $R/libgameDSO.so" </dev/null | tr -d '\r' | tr '\n' ' ')"
+  ;;
+run)
+  name=$1; shift
+  save=none
+  if [ "${1:-}" != -- ]; then save=$1; shift; fi
+  [ "${1:-}" = -- ] && shift
+  args=()
+  while [ $# -gt 0 ]; do
+    if [ "$1" = -script ]; then adbs push "$2" $R/runs/$name.script >/dev/null; args+=(-script $R/runs/$name.script); shift 2
+    elif [ "$1" = -vec ]; then adbs push "$2" $R/runs/$name.vec >/dev/null; args+=(-vec $R/runs/$name.vec); shift 2
+    else args+=("$1"); shift; fi
+  done
+  adbs shell "rm -rf $R/runs/$name && mkdir -p $R/runs/$name/files $R/runs/$name/out" </dev/null
+  if [ "$save" != none ]; then
+    for f in "$save"/*; do adbs push "$f" $R/runs/$name/files/ >/dev/null; done
+  fi
+  mkdir -p work/ref-oracle/runs
+  start=$(date +%s)
+  adbs shell "cd $R && ./arel-oracle -so $R/libgameDSO.so -assets $PHONE_DIR/assets -files $R/runs/$name/files -out $R/runs/$name/out ${args[*]}; echo exit=\$?" </dev/null | tr -d '\r' >work/ref-oracle/last-stdout.txt
+  rc=$(sed -n 's/^exit=//p' work/ref-oracle/last-stdout.txt | tail -1)
+  rm -rf work/ref-oracle/runs/$name
+  adbs pull $R/runs/$name/out work/ref-oracle/runs/$name >/dev/null
+  adbs pull $R/runs/$name/files work/ref-oracle/runs/$name/files >/dev/null 2>&1 || true
+  cat work/ref-oracle/last-stdout.txt
+  echo "ref-oracle run $name: exit=$rc, $(( $(date +%s) - start )) s, results in emu/work/ref-oracle/runs/$name"
+  [ "$rc" = 0 ]
+  ;;
+*) echo "usage: emu/scripts/ref-oracle build | setup | run NAME [SAVE] -- ARGS"; exit 2 ;;
+esac

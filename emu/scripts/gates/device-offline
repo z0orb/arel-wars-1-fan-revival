@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+# Offline device gate (PLAN.md TASK-E5.3, GC-E5.5, GC-E5.7): a port of v1 scripts/gates/gate-6 for the dev
+# package. Usage: emu/scripts/gates/device-offline [debug|release] [ADB INSTALL FLAGS]
+#   for example: device-offline debug --abi armeabi-v7a   (GC-E5.7: the native armeabi-v7a path)
+# It opens the online menus, the purchases, Export and Import, and it clears a stage. So it plays on the test
+# save (docs/saves/testsave). It backs up the saves of the dev package first and puts them back at the end.
+# Taps are v1 screen pixels. scripts/play maps them to the box of ArelInsets. Nobody touches the phone.
+source "$(dirname "$0")/../env.sh"
+source scripts/gates/lib.sh
+source scripts/gates/devlib.sh
+v=${1:-debug}; shift || true
+iflags=("$@")
+# The evidence folder name: device-offline-VARIANT, then the flags (--abi armeabi-v7a gives -abi-armeabi-v7a).
+suffix=""; for f in "${iflags[@]}"; do suffix="$suffix-${f#--}"; done
+dev_start "device-offline-$v$suffix" "$v" "${iflags[@]}"
+phone_up || { fail "phone $SERIAL connected"; gate_end; }
+v1_before=$(v1_installed_sha)
+swap_in_test_save || gate_end
+# The test save is in place with debug. Now the variant, with the extra install flags (-r keeps the data).
+if [ ${#iflags[@]} -gt 0 ]; then install_v "$v" "${iflags[@]}"; else ensure_v "$v"; fi
+check "installed $v ${iflags[*]}" test "$(installed_v)" = "$v"
+want=arm64-v8a; prev=""; for f in "${iflags[@]}"; do [ "$prev" = --abi ] && want=$f; prev=$f; done
+a=$(abi); echo "primaryCpuAbi=$a" >"$EV/abi.txt"
+check "primaryCpuAbi is $want ($a)" test "$a" = "$want"
+
+usable() { # NAME: a tap on COMMUNITY must change the screen, then it closes again
+  local a b c
+  a=$(shot "$1"); play steps usable_probe; b=$(shot "$1-probe")
+  c=$(changed "$a" "$b"); play steps usable_probe_back
+  echo "$c" >"$b.change"
+  at_least "$c" "$(P e5_corner_min_change)"
+}
+
+launch
+check "to_worldmap ran" play steps to_worldmap
+h0=$(save_hash "$v")
+m0=$(shot map-before)
+check "the save hash is readable through the $v route ($h0)" test -n "$h0"
+
+# Each online menu must show the offline message within the limit, then go back to a usable map.
+limit=$(P e5_menu_return_sec); pid=$(app_pid)
+n=$(P e5_online_menus)
+for ((i = 0; i < n; i++)); do
+  play steps "online$i" || fail "online menu $i steps"
+  sleep "$limit"
+  s=$(shot "menu$i")
+  c=$(region "$s" e5_offline_popup)
+  check "online menu $i shows the offline message within ${limit}s (changed $c against the v1 golden)" at_most "$c" "$(P e5_offline_popup.max)"
+  play steps "online_ret$i" || fail "online menu $i return steps"
+  ok=0; usable "menu$i-return" && [ -n "$pid" ] && [ "$(app_pid)" = "$pid" ] && ok=1
+  check "online menu $i goes back to a usable map, no crash or exit" test $ok = 1
+done
+
+# Real-money purchases show a message (a Toast) and give nothing.
+n=$(P e5_purchase_menus)
+for ((i = 0; i < n; i++)); do
+  play steps "buy$i" || fail "purchase $i steps"
+  s=$(shot "buy$i")
+  c=$(region "$s" e5_purchase_toast)
+  # From API 30 the message is ArelNotice (DIVERGENCES.md 11), so the golden is an emu golden.
+  check "purchase $i shows the offline message in full (changed $c against $(P e5_purchase_toast.golden))" at_most "$c" "$(P e5_purchase_toast.max)"
+  sleep 5
+  s=$(shot "buy$i-later"); c=$(region "$s" e5_purchase_toast)
+  check "purchase $i: the message goes away after 3.5 s (changed $c)" at_least "$c" 0.5
+  play steps "buy_ret$i" || fail "purchase $i return steps"
+  ok=0; usable "buy$i-return" && [ -n "$pid" ] && [ "$(app_pid)" = "$pid" ] && ok=1
+  check "purchase $i goes back to a usable map, no crash or exit" test $ok = 1
+done
+sleep 3
+h=$(save_hash "$v")
+check "online menus and purchases leave the save hash as it was" test -n "$h0" -a "$h" = "$h0"
+
+for m in open_export_and_back_out open_import_and_back_out; do
+  check "$m ran" play steps "$m"
+  sleep 3
+  h=$(save_hash "$v")
+  check "$m leaves the save hash as it was" test -n "$h0" -a "$h" = "$h0"
+done
+
+# A new start, because a closed menu hides the stage panel that the macro needs.
+launch
+play steps to_worldmap
+check "clear_stage ran" play steps clear_stage
+s=$(shot cleared)
+# A loss also changes the save (EXP), so the panel of the next stage is the proof of a clear.
+c=$(region "$s" e5_next_stage)
+check "the next stage is open on the map (changed $c against the v1 golden)" at_most "$c" "$(P e5_next_stage.max)"
+sleep 10
+h2=$(save_hash "$v")
+check "the save hash changes after a stage clear" test -n "$h2" -a "$h0" != "$h2"
+# The Cash rule (v1 patch 0004-cash-reward): a stage win pays Cash. The test save has Cash 0. The Cash
+# counter of the HUD (v1 screen pixels 1543 18 1783 66) must change. On a still map it changes 0.0000, and
+# from Cash 0 to 12 it changes 0.13 (run 20261111-125913). Release and the native armeabi-v7a path have no
+# debug log, so this check is for all paths. The v1 golden next-stage.png is older than the Cash patch.
+c=$(node tools/screen.mjs region-changed "$m0" "$s" 1543 18 1783 66 $(box) $(box))
+check "the Cash rule: the Cash counter changes after a stage win (changed $c, min 0.05)" at_least "$c" 0.05
+# The probe of the debug log adds the exact values. The native armeabi-v7a path writes no debug log, and
+# then play dbglog writes the error text of cat. So look for probe lines, not for a file that is not empty.
+play dbglog "$EV/dbg-clear.txt" 2>/dev/null
+if [ "$v" = debug ] && grep -qP '\tprobe state ' "$EV/dbg-clear.txt"; then
+  c0=$(grep -P '\tprobe state ' "$EV/dbg-clear.txt" | head -1 | sed -n 's/.* cash \([0-9]*\).*/\1/p')
+  c1=$(grep -P '\tprobe state ' "$EV/dbg-clear.txt" | tail -1 | sed -n 's/.* cash \([0-9]*\).*/\1/p')
+  check "the Cash rule: a stage win pays Cash (cash $c0 to $c1)" test -n "$c0" -a -n "$c1" -a "${c1:-0}" -gt "${c0:-0}"
+fi
+
+bash scripts/app stop
+launch
+h=$(save_hash "$v")
+check "the save survives force-stop and a new start" test -n "$h2" -a "$h" = "$h2"
+check "load_progress ran" play steps load_progress
+s=$(shot load-after-relaunch)
+c=$(region "$s" e5_next_stage)
+check "the progress loads after a new start (changed $c)" at_most "$c" "$(P e5_next_stage.max)"
+
+if [ ${#iflags[@]} -gt 0 ]; then install_v "$v" "${iflags[@]}"; else install_v "$v"; fi && pass "adb install -r" || fail "adb install -r"
+launch
+h=$(save_hash "$v")
+check "the save survives adb install -r" test -n "$h2" -a "$h" = "$h2"
+check "load_progress ran after the update" play steps load_progress
+s=$(shot load-after-update)
+c=$(region "$s" e5_next_stage)
+check "the progress loads after adb install -r (changed $c)" at_most "$c" "$(P e5_next_stage.max)"
+a=$(abi)
+check "primaryCpuAbi is still $want after adb install -r ($a)" test "$a" = "$want"
+dev_checks "$v"
+grep -q 'readAssete IOException' "$EV/logcat-$v-$DEVRUN.txt" && fail "logcat has no readAssete IOException" || pass "logcat has no readAssete IOException"
+
+# The save mirror and the real files must agree, so a release backup is as good as a debug one.
+bash scripts/app stop; sleep 1
+if [ "$v" = debug ]; then
+  m=$EV/mirror; mkdir -p "$m"; adbs pull "/sdcard/Android/data/$DEV_PKG/files/saves/." "$m" </dev/null >/dev/null 2>&1
+  check "the save mirror equals the real saves" test -n "$(set_hash "$m")" -a "$(set_hash "$m")" = "$(save_hash debug)"
+fi
+backup=$EV/backup; mkdir -p "$backup"
+if [ "$v" = debug ]; then play saves-get "$backup"; else adbs pull "/sdcard/Android/data/$DEV_PKG/files/saves/." "$backup" </dev/null >/dev/null 2>&1; fi
+check "a backup of the cleared save set (emu/$backup)" test -s "$backup/option.sav" -a "$(set_hash "$backup")" = "$h2"
+
+# Restore needs a debuggable build. Wreck the saves first, or a restore that did nothing would still pass.
+ensure_v debug
+play saves-put $TS
+check "restore of the backup" play saves-put "$backup"
+if [ ${#iflags[@]} -gt 0 ]; then install_v "$v" "${iflags[@]}"; else ensure_v "$v"; fi
+launch
+h=$(save_hash "$v")
+check "the restored save equals the backup" test "$h" = "$h2"
+check "load_progress ran after the restore" play steps load_progress
+s=$(shot load-after-restore)
+c=$(region "$s" e5_next_stage)
+check "the restored save loads (changed $c)" at_most "$c" "$(P e5_next_stage.max)"
+bash scripts/app stop
+
+put_back_saves debug
+# An --abi install stays until the next install. Put back a normal install, so later gates get the default ABI.
+if [ ${#iflags[@]} -gt 0 ]; then install_v debug && pass "debug installed again with no extra flags" || fail "debug installed again with no extra flags"; fi
+check "CC-1 installed v1 APK hash is unchanged ($v1_before)" test "$(v1_installed_sha)" = "$V1_APK_SHA" -a "$v1_before" = "$V1_APK_SHA"
+gate_end

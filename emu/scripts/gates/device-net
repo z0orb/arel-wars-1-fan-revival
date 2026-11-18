@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# Network device gate (PLAN.md TASK-E5.3, GC-E5.2): a port of v1 scripts/gates/gate-3 for the dev package.
+# Usage: emu/scripts/gates/device-net [debug|release ...]   (default: debug release)
+# The Wi-Fi of the phone must be on, and airplane mode off (trap 5 of cleanroom-PLAN.md). The gate does not
+# change these settings. It only reads them. It installs a variant when the installed APK is another one.
+source "$(dirname "$0")/../env.sh"
+source scripts/gates/lib.sh
+source scripts/gates/devlib.sh
+dev_start device-net "$@"
+variants=("$@"); [ ${#variants[@]} -gt 0 ] || variants=(debug release)
+phone_up || { fail "phone $SERIAL connected"; gate_end; }
+v1_before=$(v1_installed_sha)
+# Netstats updates only when something polls it. Without the poll, recent traffic does not show (v1, 2026-11-05).
+netstats_dump() { adbs shell dumpsys netstats --poll </dev/null >/dev/null; adbs shell dumpsys netstats detail </dev/null | tr -d '\r' >"$1"; }
+netstats_uid() { # FILE UID: the total of the rb= and tb= bytes of that UID
+  node -e '
+    const fs = require("fs"); let total = 0, on = false;
+    for (const line of fs.readFileSync(process.argv[1], "utf8").split(/\r?\n/)) {
+      const m = line.match(/\buid=(-?\d+)\b/);
+      if (m) on = m[1] === process.argv[2];
+      else if (on) for (const r of line.matchAll(/\b[rt]b=(\d+)/g)) total += Number(r[1]);
+    }
+    console.log(total);' "$1" "$2"
+}
+for v in "${variants[@]}"; do
+  ensure_v "$v" && pass "$v: installed" || fail "$v: installed"
+  check "$v: airplane mode off" test "$(adbs shell settings get global airplane_mode_on </dev/null | tr -d '\r')" = 0
+  check "$v: Wi-Fi on" test "$(adbs shell settings get global wifi_on </dev/null | tr -d '\r')" != 0
+  adbs shell dumpsys connectivity </dev/null | tr -d '\r' | grep -m3 -E 'Active default network|NetworkAgentInfo.*WIFI' >"$EV/connectivity-$v.txt"
+  check "$v: the phone has an active network" test -s "$EV/connectivity-$v.txt"
+
+  uid=$(bash scripts/app uid)
+  netstats_dump "$EV/netstats-before-$v.txt"
+  launch
+  dev_checks "$v"
+
+  apk=$(apk_of "$v")
+  aapt2 dump permissions "$apk" 2>&1 | tr -d '\r' | sed -n "s/^uses-permission: name='\([^']*\)'.*/\1/p" | sort >"$EV/permissions-$v.txt"
+  check "$v: the permissions are exactly VIBRATE" test "$(cat "$EV/permissions-$v.txt")" = android.permission.VIBRATE
+  # The whole tree: the original also has a permission group with the INTERNET name in it.
+  aapt2 dump xmltree --file AndroidManifest.xml "$apk" 2>&1 | tr -d '\r' >"$EV/manifest-$v.txt"
+  check "$v: INTERNET is absent from the manifest" bash -c "grep -q ' E: manifest' '$EV/manifest-$v.txt' && ! grep -q 'android.permission.INTERNET' '$EV/manifest-$v.txt'"
+  # Granted permissions of the installed package: INTERNET must not be there.
+  adbs shell dumpsys package $DEV_PKG </dev/null | tr -d '\r' >"$EV/dumpsys-package-$v.txt"
+  check "$v: the installed package has no INTERNET permission" bash -c "! grep -q 'android.permission.INTERNET' '$EV/dumpsys-package-$v.txt'"
+
+  # With no input, the title may only blink its prompt. Otherwise an intro that moves on by itself would
+  # pass the tap check.
+  control=$(shot "title-control-$v"); sleep 3; before=$(shot "title-before-$v")
+  idle=$(changed "$control" "$before")
+  check "$v: the title holds with no input (changed $idle)" at_most "$idle" "$(P e5_title_idle_max_change)"
+  check "$v: title tap sent" play steps title_tap
+  sleep 3
+  after=$(shot "title-after-$v")
+  tapped=$(changed "$before" "$after")
+  check "$v: a tap changes the title screen (changed $tapped)" at_least "$tapped" "$(P e5_title_tap_min_change)"
+  sleep "$(P e5_netstats_wait_sec)"
+  netstats_dump "$EV/netstats-after-$v.txt"
+  a=$(netstats_uid "$EV/netstats-before-$v.txt" "$uid"); b=$(netstats_uid "$EV/netstats-after-$v.txt" "$uid")
+  check "GC-E5.2 $v: zero app traffic over the wait (uid $uid, $a to $b bytes)" test -n "$uid" -a "$a" = "$b"
+  dev_checks "$v"
+  bash scripts/app stop
+done
+check "CC-1 installed v1 APK hash is unchanged ($v1_before)" test "$(v1_installed_sha)" = "$V1_APK_SHA" -a "$v1_before" = "$V1_APK_SHA"
+gate_end

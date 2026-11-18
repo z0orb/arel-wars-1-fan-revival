@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# Phase E8 exit gate (PLAN.md 10, Phase E8): release v2.0.0.
+# Usage: emu/scripts/gates/gate-E8
+# The gate does not build, install or run other gates. It reads:
+#   - the newest output of each gate-E0 to gate-E7. Each one must pass and be newer than the release build
+#     in dist/ (GC-E8.1). gate-E5, gate-E6 and gate-E7 also accept only evidence of the builds in dist/.
+#   - dist/arelwars-public.apk: the same entries as the release build, except the manifest and the
+#     signature (tools/apk-diff.mjs). The package, the key, the version, the permission and the notice.
+#   - the newest migration evidence (logs/e8-migrate-*, scripts/e8-migrate) and docs/OWNER.md (GC-E8.2)
+#   - git ls-files (CC-4) and the public files (GC-E8.3), docs/INSTALL-v2.md (GC-E8.4)
+source "$(dirname "$0")/../env.sh"
+source scripts/gates/lib.sh
+gate_start E8
+PUB=dist/arelwars-public.apk
+REL=dist/arelemu-release.apk
+PUB_PKG=io.github.z0orb.arelwars
+PUB_CERT=ce95acf9500fecf5ae98109e4366b7b75fb9f4720d067c4c4a2a9d476a6a8c97
+owner_yes() { grep -qE "^$1: yes" docs/OWNER.md; }
+
+common_checks
+artefact_check
+
+# ---- GC-E8.1: all E gates pass on the release build in dist/ now.
+for n in 0 1 2 3 4 5 6 7; do
+  d=$(ls -1d logs/gate-E$n-2* 2>/dev/null | sort -r | head -1)
+  check "GC-E8.1 the newest gate-E$n run passed (${d:-none})" grep -qx "GATE-E$n PASS" "${d:-/nonexistent}/output.txt"
+  check "GC-E8.1 the newest gate-E$n run is newer than $REL" test "${d:-/nonexistent}/output.txt" -nt "$REL"
+done
+check "GC-E8.1 $REL matches its .sha256" test "$(sha "$REL")" = "$(cat "$REL.sha256")"
+check "GC-E8.1 $PUB matches its .sha256" test "$(sha "$PUB")" = "$(cat "$PUB.sha256")"
+node tools/apk-diff.mjs "$REL" "$PUB" >"$EV/apk-diff.txt" 2>&1
+check "GC-E8.1 $PUB equals $REL except the manifest and the signature ($(head -1 "$EV/apk-diff.txt"))" grep -q '^APK DIFF OK' "$EV/apk-diff.txt"
+aapt2 dump badging "$PUB" >"$EV/badging.txt" 2>&1
+aapt2 dump permissions "$PUB" >"$EV/permissions.txt" 2>&1
+apksigner.bat verify --print-certs "$PUB" >"$EV/certs.txt" 2>&1
+check "GC-E8.1 public package $PUB_PKG, version 2.0.0 (code 200)" grep -q "^package: name='$PUB_PKG' versionCode='200' versionName='2.0.0'" "$EV/badging.txt"
+check "GC-E8.1 public label is Arel Wars" grep -qx "application-label:'Arel Wars'" "$EV/badging.txt"
+check "GC-E8.1 the ABIs are arm64-v8a, armeabi-v7a and x86_64" grep -qx "native-code: 'arm64-v8a' 'armeabi-v7a' 'x86_64'" "$EV/badging.txt"
+check "GC-E8.1 the only permission is VIBRATE" test "$(grep -c '^uses-permission' "$EV/permissions.txt")" = 1 -a -n "$(grep "^uses-permission: name='android.permission.VIBRATE'" "$EV/permissions.txt")"
+check "GC-E8.1 no INTERNET permission" bash -c "! grep -q 'android.permission.INTERNET' '$EV/permissions.txt'"
+check "GC-E8.1 the release key signs $PUB (certificate SHA-256 $PUB_CERT)" grep -q "certificate SHA-256 digest: $PUB_CERT" "$EV/certs.txt"
+check "GC-E8.1 HANDOFF.md records the release key fingerprint" grep -qi "$(echo $PUB_CERT | sed 's/../&:/g; s/:$//')" ../HANDOFF.md
+
+# ---- GC-E8.2: the owner's migrated save loads in the release build, and the v1 copy stays.
+M=$(ls -1d logs/e8-migrate-2* 2>/dev/null | sort -r | head -1)
+check "GC-E8.2 migration evidence (${M:-none})" test -n "$M" -a -f "${M:-/nonexistent}/result.txt"
+if [ -n "$M" ]; then
+  check "GC-E8.2 the migration used $PUB now" grep -qx "public $(sha "$PUB")" "$M/result.txt"
+  check "GC-E8.2 the v1 files passed the load checks" grep -qx "save-check PASS" "$M/result.txt"
+  check "GC-E8.2 the imported set equals the v1 set, byte for byte" grep -qx "imported equals v1 PASS" "$M/result.txt"
+  check "GC-E8.2 the v1 mirror did not change" grep -qx "v1 mirror unchanged PASS" "$M/result.txt"
+  check "GC-E8.2 v1 is still installed, with its APK hash" grep -qx "v1 installed PASS" "$M/result.txt"
+fi
+check "GC-E8.2 docs/OWNER.md has emu-save-migrated: yes" owner_yes emu-save-migrated
+
+# ---- GC-E8.3: the public set, and the notice in the APK and in git.
+check "GC-E8.3 $PUB holds assets/emu/NOTICE.txt" bash -c "unzip -l '$PUB' | grep -q ' assets/emu/NOTICE.txt\$'"
+check "GC-E8.3 the notice in the APK equals docs/NOTICE.md" bash -c "unzip -p '$PUB' assets/emu/NOTICE.txt | cmp -s - docs/NOTICE.md"
+check "GC-E8.3 git tracks emu/docs/NOTICE.md" grep -qx 'emu/docs/NOTICE.md' "$EV/git-ls-files.txt"
+grep -E '^emu/(shell/patches/v1/|shell/patches/emu/smali/|ref-oracle/|work/|dist/|logs/|keys/|docs/saves/|third_party/archives/)' "$EV/git-ls-files.txt" >"$EV/forbidden.txt"
+check "GC-E8.3 git tracks none of the never-push paths of TASK-E8.3" test ! -s "$EV/forbidden.txt"
+grep -E '\.(so|apk|jks|enc|dat|sav|pass)$' "$EV/git-ls-files.txt" >"$EV/forbidden-ext.txt"
+check "GC-E8.3 git tracks no library, APK, key or save file" test ! -s "$EV/forbidden-ext.txt"
+
+# ---- GC-E8.4: docs/INSTALL-v2.md covers the Q-1 route and each HyperOS item of E5.
+I=../docs/INSTALL-v2.md
+check "GC-E8.4 docs/INSTALL-v2.md is tracked" grep -qx 'docs/INSTALL-v2.md' "$EV/git-ls-files.txt"
+for k in 'advanced flow' 'adb install -r' 'Install anyway' 'Unsafe app blocked' 'Save Import' \
+         'INSTALL_FAILED_USER_RESTRICTED' 'canceled by user' 'security scan' 'FPS-BOOST' '3:2' '--abi armeabi-v7a'; do
+  check "GC-E8.4 docs/INSTALL-v2.md covers \"$k\"" grep -qF -- "$k" "$I"
+done
+
+# ---- GC-E8.5: the owner plays and accepts.
+check "GC-E8.5 docs/OWNER.md has emu-accepted: yes" owner_yes emu-accepted
+
+gate_end

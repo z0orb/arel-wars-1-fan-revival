@@ -1,0 +1,19 @@
+[
+  { "op": "add-element", "parent": "application", "element": {
+    "tag": "activity",
+    "attrs": [
+      { "attr": "label", "id": "0x01010001", "type": "string", "value": "Arel Wars Save Import" },
+      { "attr": "name", "id": "0x01010003", "type": "string", "value": "com.gamevil.nexus2.ArelImport" },
+      { "attr": "taskAffinity", "id": "0x01010012", "type": "string", "value": "" },
+      { "attr": "excludeFromRecents", "id": "0x01010017", "type": "bool", "value": true },
+      { "attr": "screenOrientation", "id": "0x0101001e", "type": "int", "value": 0 },
+      { "attr": "configChanges", "id": "0x0101001f", "type": "hex", "value": "0xda0" }
+    ],
+    "children": [
+      { "tag": "intent-filter", "children": [
+        { "tag": "action", "attrs": [ { "attr": "name", "id": "0x01010003", "type": "string", "value": "android.intent.action.MAIN" } ] },
+        { "tag": "category", "attrs": [ { "attr": "name", "id": "0x01010003", "type": "string", "value": "android.intent.category.LAUNCHER" } ] }
+      ] }
+    ]
+  } }
+]
