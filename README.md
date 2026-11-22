@@ -163,3 +163,7 @@ Because step 1 depends on unpublished patches, this repository alone does not re
 ## Not affiliated
 
 Arel Wars is a trademark of its owner. This is an unofficial fan project, not affiliated with or endorsed by Gamevil or Com2uS. It is not sold, and it contains no in-app purchases.
+
+## Credit and license
+
+Arel Wars was created by **Gamevil**. Nothing in the original game was made by this project. Its only part is bringing the game back to a playable state on modern Android. The project's own code is under the MIT License, and the game itself is not. See [LICENSE.md](LICENSE.md).

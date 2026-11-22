@@ -1,6 +1,7 @@
 .gitignore
 CHANGELOG.md
 CHANGES.md
+LICENSE.md
 README.md
 VERIFY.md
 docs/INSTALL-v2.md
